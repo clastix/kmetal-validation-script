@@ -71,4 +71,3 @@ The full documentation is in [`docs/`](docs/README.md):
 | `setup.env` | Site description loaded by default |
 | `setup.env.example` | Example site description with random addresses, VLANs and CIDRs |
 | `docs/` | Documentation |
-| `kmetal-script-validation-design.md` | Original design |

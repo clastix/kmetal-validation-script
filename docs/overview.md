@@ -69,14 +69,14 @@ reached from the tenant VLAN, and EIP reachability.
 | FAIL | A requirement is not met; tenant workloads will break or the platform is unhealthy | `1` |
 | INFO | Context: a decision the tool made, or an expected deviation | none |
 
-## Relation to the design document
+## Design decisions
 
-The tool implements [`kmetal-script-validation-design.md`](../kmetal-script-validation-design.md).
-Where the design and the 1.0.0 documentation differ, the tool follows the documentation:
+Where a requirement could be read more than one way, the tool follows the kMetal 1.0.0
+documentation:
 
-| Design | Tool | Why |
+| Topic | Behaviour | Why |
 |---|---|---|
-| Worker images from `kmetal.spec.osArtifact.tags` | `spec.clusterClass.values.osArtifact.tags` | The actual field path in the `KMetal` resource |
-| `kube-ovn/role=master` on network nodes | On `spec.networking.kubeOVN.centralNodes`, ideally the three control planes | It is ovn-central's nodeSelector |
-| Overlay required on control planes | INFO when absent on a control plane | Control planes are not network nodes; Kube-OVN's tunnel runs on `kmetal.io/ovn` nodes only |
-| Minimum lab of 1 control plane + 2 workers | Kept: below that is a FAIL, below 3 control planes a WARN | The docs' production layout has 3 control planes |
+| Worker OS images | Read from `spec.clusterClass.values.osArtifact.tags` | The field path in the `KMetal` resource |
+| `kube-ovn/role=master` | Checked on `spec.networking.kubeOVN.centralNodes`, ideally the three control planes | It is ovn-central's nodeSelector |
+| Overlay on control planes | INFO when absent | Control planes are not network nodes; Kube-OVN's tunnel runs on `kmetal.io/ovn` nodes only |
+| Minimum size | Fewer than 1 control plane + 2 workers is a FAIL; fewer than 3 control planes is a WARN | The documented production layout has 3 control planes |
