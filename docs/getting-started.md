@@ -4,158 +4,183 @@
 
 ## Requirements
 
-**Bootstrap machine** (where the script runs):
+**Bootstrap machine** (where Ansible runs):
 
 | Tool | Used by |
 |---|---|
-| bash ≥ 4 | everything (associative arrays) |
-| `ssh` | `undercluster`, and the SSH-based probes of `kmetal` |
-| `jq`, `awk`, `base64` | parsing node facts and Kubernetes JSON |
-| `kubectl`, `helm`, `curl` | `kmetal` |
+| Python 3.10 or later | Ansible |
+| `ansible-core`, the `kubernetes` Python client (`requirements.txt`) | every playbook; the client is used by `kubernetes.core` |
+| the `kubernetes.core` collection (`requirements.yml`) | creating and reading test objects |
+| `ssh` | `undercluster.yml`, and the SSH checks of `kmetal.yml` |
+| `kubectl`, `helm` | `kmetal.yml`, `cleanup.yml`, and the cluster cross-checks of `undercluster.yml` |
 
 **Nodes:**
-- reachable over SSH on their management address, as `SSH_USER`;
-- `sudo -n` (passwordless) for that user, or `SSH_USER=root` with `SSH_SUDO=""`;
-- `ip` (iproute2), `ping` and `curl` installed (standard on Ubuntu);
+- reachable over SSH on their management address, as `ansible_user`;
+- passwordless `sudo -n` for that user, or `ansible_user: root`;
+- Python 3 (standard on Ubuntu), `ip` (iproute2), `ping` and `curl`;
 - `kubectl` on the control planes, only when the tenant API must be reached through a control
   plane (see [End-to-end tests](e2e-test.md#tenant-api-access)).
 
-**Cluster access:** an admin kubeconfig of the under cluster for `kmetal`. The end-to-end test
-impersonates tenant users, which requires the `impersonate` verb that cluster-admin has.
+**Cluster access:** an admin kubeconfig of the under cluster for `kmetal.yml`. The end-to-end
+tests impersonate tenant users, which needs the `impersonate` verb that cluster-admin has.
+
+## Installation
+
+From the repository root:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+ansible-galaxy collection install -r requirements.yml -p ./collections
+```
+
+`.venv/` and `collections/` are gitignored. Activate the venv (`. .venv/bin/activate`) in every
+new shell, and run every playbook **from the repository root**: Ansible reads `ansible.cfg` from
+the current directory, and `ansible.cfg` points at the roles, plugins and collections.
 
 ## First run
 
 ```bash
 # 1. Describe the site
-$EDITOR setup.env                      # template: docs/configuration.md
+cp -r inventory/example inventory/mysite
+$EDITOR inventory/mysite/hosts.yml inventory/mysite/group_vars/all.yml   # docs/configuration.md
 
 # 2. Validate the description, contacting nothing
-./kmetal-validate check-env
+ansible-playbook -i inventory/mysite check-env.yml
 
 # 3. Check the nodes (before or after installing kMetal)
-./kmetal-validate undercluster
+ansible-playbook -i inventory/mysite undercluster.yml
 
-# 4. Check the platform, without the end-to-end test
-./kmetal-validate kmetal --kubeconfig admin.conf --no-e2e
+# 4. Check the platform, without the end-to-end tests
+export KUBECONFIG=$PWD/admin.conf
+ansible-playbook -i inventory/mysite kmetal.yml --skip-tags e2e,e2e-tenants
 
 # 5. Run the end-to-end tests (3 tenants, 4 clusters, 6 VMs; about 25 to 45 minutes)
-./kmetal-validate kmetal --kubeconfig admin.conf --e2e-only
+ansible-playbook -i inventory/mysite kmetal.yml --tags e2e,e2e-tenants
 ```
 
 Agree on step 5 with the customer first: it consumes addresses and capacity. See
 [Resources and cleanup](resources-and-cleanup.md).
 
-## Commands
+## Playbooks
 
-| Command | Does |
+| Playbook | Does |
 |---|---|
-| `undercluster` | Under cluster checks over SSH ([details](undercluster-checks.md)) |
-| `kmetal` | Platform checks and end-to-end tests ([details](kmetal-checks.md), [e2e](e2e-test.md)) |
-| `cleanup --run-id ID` | Deletes everything a run left behind ([details](resources-and-cleanup.md#cleanup)) |
-| `check-env` | Parses and validates `setup.env`, prints the node table, contacts nothing |
-| `help` | Usage |
-| `undercluster help [group]`, `kmetal help [group]` | Without a group: the command's check groups, each with a one-line summary. With a group: a short explanation of what it tests, how, its FAIL/WARN conditions and what it needs ([details](#help-on-check-groups)) |
-| `version` | Script version and the kMetal version it validates |
-| `selftest` | Hidden: tests the IP arithmetic helpers ([Internals](internals.md#testing)) |
+| `check-env.yml` | Validates the inventory and prints the node table. Contacts nothing |
+| `undercluster.yml` | Under cluster checks over SSH ([details](undercluster-checks.md)) |
+| `kmetal.yml` | Platform checks and end-to-end tests ([details](kmetal-checks.md), [e2e](e2e-test.md)). The inventory is optional |
+| `site.yml` | `undercluster.yml`, then `kmetal.yml`, with a single final summary |
+| `cleanup.yml -e kmv_run_id=ID` | Deletes everything a run left behind ([details](resources-and-cleanup.md#cleanup)) |
+| `help.yml` | Usage; `-e cmd=undercluster` or `-e cmd=kmetal` lists the check groups; add `-e group=<g>` for one group ([details](#help-on-check-groups)) |
+| `selftest.yml` | Tests the IP arithmetic and parsing filters ([Internals](internals.md#testing)) |
 
 ## Help on check groups
 
-Every check group has a built-in help text. It needs no `setup.env`, kubeconfig or network
+Every check group has a built-in help text. It needs no inventory, kubeconfig or network
 access.
 
 ```bash
-./kmetal-validate undercluster help          # list the undercluster groups with a summary
-./kmetal-validate kmetal help                # list the kmetal groups with a summary
-./kmetal-validate kmetal help e2e-tenants    # explain one group
+ansible-playbook help.yml -e cmd=undercluster              # list the undercluster groups
+ansible-playbook help.yml -e cmd=kmetal                    # list the kmetal groups
+ansible-playbook help.yml -e cmd=kmetal -e group=nodes     # explain one group
 ```
 
-Equivalent spellings: `kmetal-validate help kmetal e2e-tenants` and
-`kmetal-validate kmetal --help e2e-tenants`. An unknown group name exits with code `3` and
-lists the valid names.
+An unknown group fails and lists the valid names.
 
 ```
-$ ./kmetal-validate undercluster help mesh
-mesh - full-mesh reachability on every node network
-
-  Each node pings every peer address on each network both have, bound to that
-  network's interface, all nodes in parallel:
-    ping -c3 -i0.2 -W1 -q -I <iface> <peer>
-  When NET_MTU > 1500, a do-not-fragment ping of MTU-28 bytes checks jumbo frames.
-
-  FAIL  peer unreachable (100% loss)
-  WARN  partial loss; jumbo frame does not pass end to end
-  Needs setup.env, SSH
+$ ansible-playbook help.yml -e cmd=undercluster -e group=mesh
+    msg:
+    - mesh - full-mesh reachability on every node network
+    - ''
+    - '  Each node pings every peer address on each network both have, bound to that'
+    - '  network''s interface, all nodes in parallel:'
+    - '    ping -c3 -i0.2 -W1 -q -I <iface> <peer>'
+    ...
 ```
 
 Each text gives a summary line, then how the check is performed, then its FAIL, WARN and INFO
 conditions, then what it needs. The full rules are in
 [Under cluster checks](undercluster-checks.md) and [Platform checks](kmetal-checks.md).
 
-## Flags
+## Selecting check groups: tags
 
-Flags may come before or after the command.
+Every check group is a tag. Ansible's `--tags` runs only the listed groups, `--skip-tags`
+skips them. Preparation, connectivity, the summary and cleanup always run.
 
-| Flag | Applies to | Effect |
-|---|---|---|
-| `-e, --env FILE` | all | `setup.env` to load. Default `./setup.env`; required by `undercluster`, optional for `kmetal` |
-| `--kubeconfig FILE` | all | Under cluster kubeconfig (default `$KUBECONFIG`) |
-| `--only g1,g2` | `undercluster`, `kmetal` | Run only these check groups |
-| `--skip g1,g2` | `undercluster`, `kmetal` | Skip these check groups |
-| `--keep` | all | Do not delete test resources; print the cleanup command instead |
-| `-v, --verbose` | all | Trace every command (`set -x`); `DEBUG=true` does the same |
-| `--no-e2e` | `kmetal` | Skip both end-to-end groups (`e2e`, `e2e-tenants`) |
-| `--e2e-only` | `kmetal` | Run only the end-to-end groups. For a single scenario use `--only e2e` or `--only e2e-tenants` instead |
-| `--force-e2e` | `kmetal` | Run the end-to-end groups even when earlier groups failed |
-| `--timeout-cluster D` | `kmetal` | How long to wait for tenant clusters (default `30m`; `s`, `m`, `h` suffixes) |
-| `--run-id ID` | `cleanup` | The run to clean up |
-
-**Check group names:**
-
-| Command | Groups, in execution order |
+| Playbook | Tags, in execution order |
 |---|---|
-| `undercluster` | `topology` `hardware` `os` `interfaces` `netplan` `addressing` `mesh` `internet` `encap` (connectivity always runs first) |
-| `kmetal` | `platform` `operator` `metallb` `storage` `nodes` `providers` `tenancy` `capi` `kubevirt` `crds` `e2e` `e2e-tenants` |
+| `undercluster.yml` | `topology` `addressing` (on the bootstrap machine), then `hardware` `os` `interfaces` `netplan` `mesh` `internet` `encap` (on the nodes; `connectivity` always runs first) |
+| `kmetal.yml` | `platform` `operator` `metallb` `storage` `nodes` `providers` `tenancy` `capi` `kubevirt` `crds` `e2e` `e2e-tenants` |
+
+`ansible-playbook <playbook> --list-tags` prints them too.
+
+## Options
+
+Options are variables set with `-e name=value`. They override the inventory.
+
+| Option | Applies to | Effect |
+|---|---|---|
+| `-i inventory/<site>` | all | The site description. Required by `check-env.yml` and `undercluster.yml`; optional for `kmetal.yml` |
+| `-e kmv_kubeconfig=FILE` | all | Under cluster kubeconfig (default `$KUBECONFIG`, else `~/.kube/config`) |
+| `--tags g1,g2` / `--skip-tags g1,g2` | `undercluster.yml`, `kmetal.yml` | Run only, or skip, these check groups |
+| `--skip-tags e2e,e2e-tenants` | `kmetal.yml` | Platform checks only |
+| `--tags e2e,e2e-tenants` | `kmetal.yml` | End-to-end tests only. For a single scenario use `--tags e2e` or `--tags e2e-tenants` |
+| `-e kmv_keep=true` | `kmetal.yml` | Do not delete test resources; the summary prints the cleanup command |
+| `-e kmv_force_e2e=true` | `kmetal.yml` | Run the end-to-end groups even when earlier groups failed |
+| `-e kmv_timeout_cluster=45m` | `kmetal.yml` | How long to wait for tenant clusters (default `30m`; `s`, `m`, `h` suffixes) |
+| `-e kmv_run_id=ID` | `cleanup.yml` (required); any playbook | The run to clean up; on other playbooks, a fixed run ID instead of a random one |
+| `-v`, `-vvv` | all | More detail per task; `-vvv` shows SSH connections |
 
 ## Output
 
 ```
-kmetal-validate 0.1.0  command=undercluster  run=40213  env=./setup.env
-
-== interfaces ==
+TASK [common : prepare | run] **************************************************
+ok: [localhost] =>
+    msg:
+    - kmetal-validate 0.2.0 for kMetal 1.0.1, run ID 40213
+    - 'inventory: 3 nodes'
+    ...
+TASK [undercluster : interfaces | verdicts] ************************************
   PASS worker-01: overlay bond0.105 VLAN 105 MTU 9000 172.22.105.12/24 (on bond0)
   FAIL worker-02: provider provider (bond0.106): carries IPv4 172.22.106.13: a provider interface must have no address
-  INFO cp-01: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes (kmetal.io/ovn) only
-
-== summary ==
-  41 passed, 2 warnings, 1 failures
-  FAIL [interfaces] worker-02: provider provider (bond0.106): carries IPv4 ...
-  WARN [...] ...
+  INFO cp-01: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes ...
+...
+TASK [common : summary] ********************************************************
+ok: [localhost] =>
+    msg:
+    - 41 passed, 2 warnings, 1 failures
+    - 'FAIL [interfaces] worker-02: provider provider (bond0.106): carries IPv4 ...'
+    - 'WARN [...] ...'
 ```
 
-- The header shows the **run ID**. Every Kubernetes object the run creates carries it, and
-  `cleanup --run-id` uses it.
-- Each section is one check group. Indented lines below a result are diagnostics: logs, events
-  or the list of failing items.
+- The first task prints the **run ID**. Every Kubernetes object the run creates carries it, and
+  `cleanup.yml` uses it.
+- Each check group prints its verdicts, one indented line each, coloured by level, under the
+  task named `<group> | verdicts` (or a more specific step name).
 - The summary repeats every FAIL and WARN with its group.
-- Set `NO_COLOR=1` to disable colours; they are also off when output is not a terminal.
+- Ansible's own `ok`, `skipping`, `changed` lines describe tasks, not checks. See the
+  [Ansible primer](ansible-primer.md#reading-the-output).
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Every check passed |
-| `1` | At least one FAIL |
-| `2` | WARNs, but no FAIL |
-| `3` | Usage error, invalid `setup.env`, missing tool, or unreachable cluster API |
-| `130` | Interrupted (cleanup still runs) |
+| `0` | No FAIL (warnings, if any, are in the summary) |
+| `2` | At least one FAIL; or the inventory is invalid; or the under cluster API is unreachable for `kmetal.yml` |
+| `4` | A host could not be reached outside a check (rare: unreachable nodes are reported as FAIL verdicts instead) |
+| `99` | Interrupted (Ctrl-C); run `cleanup.yml` with the run ID |
+
+These differ from the former bash tool, which had a separate code for warnings only. Read the
+summary line to tell a clean run from a run with warnings.
 
 ## Typical sequences
 
 | Situation | Command |
 |---|---|
-| Nodes installed, kMetal not yet | `undercluster` (set `CENTRAL_NODES` in `setup.env`, since no `KMetal` resource can supply it) |
-| kMetal installed, quick health check | `kmetal --no-e2e` |
-| Acceptance of a new site | `undercluster`, then `kmetal` |
-| Re-test only networking after a fix | `undercluster --only interfaces,mesh` |
-| Check multi-tenancy segregation only | `kmetal --only e2e-tenants` |
-| Debug a failing tenant cluster | `kmetal --e2e-only --keep`, inspect, then `cleanup --run-id ID` |
+| Nodes installed, kMetal not yet | `undercluster.yml` (set `kmv_central_nodes` in the inventory, since no `KMetal` resource can supply it) |
+| kMetal installed, quick health check | `kmetal.yml --skip-tags e2e,e2e-tenants` |
+| Acceptance of a new site | `site.yml` |
+| Re-test only networking after a fix | `undercluster.yml --tags interfaces,mesh` |
+| Check multi-tenancy segregation only | `kmetal.yml --tags e2e-tenants` |
+| Debug a failing tenant cluster | `kmetal.yml --tags e2e,e2e-tenants -e kmv_keep=true`, inspect, then `cleanup.yml -e kmv_run_id=ID` |

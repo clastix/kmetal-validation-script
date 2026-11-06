@@ -1,0 +1,51 @@
+---
+# A pod in _src's tenant cluster must not reach a worker of _dst's cluster. The target is a
+# _dst address that _src does not use itself, so a reply could only come from _dst.
+# Needs _e2e_ips for both (worker_ips.yml).
+
+- name: isolation {{ _src }} -> {{ _dst }} | target
+  ansible.builtin.set_fact:
+    _iso_target: "{{ (_e2e_ips[_dst] | default([]) | difference(_e2e_ips[_src] | default([])) | first) | default('') }}"
+
+- name: isolation {{ _src }} -> {{ _dst }} | probe
+  when: _src in _e2e_tk and _iso_target | length > 0
+  block:
+    - name: isolation {{ _src }} -> {{ _dst }} | pod iso-{{ _dst }} curls {{ _iso_target }}:10250
+      ansible.builtin.command:
+        argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_src] | default({})).kc | default('') }}", apply, -f, "-"]
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'iso-' ~ _dst, 'namespace': 'kmetal-validate'},
+              'spec': {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 1,
+                       'containers': [{'name': 'c', 'image': kmv_curl_image,
+                                       'command': ['sh', '-c', 'curl -sk -o /dev/null -m 5 https://' ~ _iso_target ~ ':10250/healthz']}]}} | to_json }}
+      delegate_to: "{{ (_e2e_tk[_src] | default({})).host | default('localhost') }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+
+    - name: isolation {{ _src }} -> {{ _dst }} | wait for iso-{{ _dst }}
+      ansible.builtin.command:
+        argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_src] | default({})).kc | default('') }}", get, pod, "iso-{{ _dst }}", -n, kmetal-validate, -o, "jsonpath={.status.phase}"]
+      delegate_to: "{{ (_e2e_tk[_src] | default({})).host | default('localhost') }}"
+      ignore_unreachable: true
+      register: _iso_pod
+      until: _iso_pod.stdout in ['Succeeded', 'Failed']
+      retries: 24
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+- name: isolation {{ _src }} -> {{ _dst }} | verdict
+  kmv_record:
+    group: "{{ _e2e_envs[_src].group }}"
+    verdicts: >-
+      {%- set s, d = _e2e_envs[_src].cluster, _e2e_envs[_dst].cluster -%}
+      {%- if _src not in _e2e_tk -%}
+      {{ [{'level': 'INFO', 'msg': s ~ ' not reachable: isolation towards ' ~ d ~ ' not probed'}] }}
+      {%- elif not _iso_target -%}
+      {{ [{'level': 'INFO', 'msg': 'every ' ~ d ~ ' worker address is also used by ' ~ s ~ ': isolation ' ~ _src ~ ' -> ' ~ _dst ~ ' not probed'}] }}
+      {%- elif _iso_pod.stdout | default('') == 'Succeeded' -%}
+      {{ [{'level': 'FAIL', 'msg': s ~ ' reaches ' ~ d ~ "'s worker " ~ _iso_target ~ ':10250: VPCs are not isolated'}] }}
+      {%- else -%}
+      {{ [{'level': 'PASS', 'msg': s ~ ' cannot reach ' ~ d ~ "'s worker " ~ _iso_target ~ ': VPCs isolated'}] }}
+      {%- endif -%}

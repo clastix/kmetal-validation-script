@@ -1,0 +1,83 @@
+---
+# One LoadBalancer Service pinned to pool _pool.value (loadBalancer role _pool.key): it must
+# get an address inside the role's ranges, and answer HTTP from this machine or, failing
+# that, from the first control plane over SSH.
+
+- name: metallb | Service lb-{{ _pool.key | lower }} on pool {{ _pool.value }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "lb-{{ _pool.key | lower }}"
+        namespace: "{{ kmv_test_ns }}"
+        labels: "{{ {kmv_label_key: kmv_rid} }}"
+        annotations: {metallb.io/address-pool: "{{ _pool.value }}"}
+      spec:
+        type: LoadBalancer
+        selector: {app: lb-backend}
+        ports: [{port: 80, targetPort: 80}]
+  register: _lb_svc_apply
+  ignore_errors: true
+
+- name: metallb | wait for an EXTERNAL-IP from {{ _pool.value }}
+  kubernetes.core.k8s_info:
+    kind: Service
+    name: "lb-{{ _pool.key | lower }}"
+    namespace: "{{ kmv_test_ns }}"
+  register: _lb_svc
+  until: (_lb_svc.resources[0].status.loadBalancer.ingress | default([]) | length) > 0
+  retries: 40
+  delay: 3
+  failed_when: false
+  when: not (_lb_svc_apply.failed | default(false))
+
+- name: metallb | address
+  ansible.builtin.set_fact:
+    _lb_ip: "{{ ((_lb_svc.resources | default([{}]))[0].status.loadBalancer.ingress | default([{}]))[0].ip | default('') }}"
+
+- name: metallb | HTTP from this machine
+  ansible.builtin.uri:
+    url: "http://{{ _lb_ip }}/"
+    timeout: 5
+  register: _lb_http_local
+  failed_when: false
+  when: _lb_ip | length > 0
+
+- name: metallb | HTTP from the first control plane
+  ansible.builtin.uri:
+    url: "http://{{ _lb_ip }}/"
+    timeout: 5
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  ignore_unreachable: true
+  register: _lb_http_cp
+  failed_when: false
+  when:
+    - _lb_ip | length > 0
+    - (_lb_http_local.status | default(-1)) <= 0
+    - kmv_have_env and groups['control_plane'] | default([]) | length > 0
+
+- name: metallb | Service verdicts
+  kmv_record:
+    group: metallb
+    verdicts: >-
+      {%- set role, p = _pool.key, _pool.value -%}
+      {%- set v = [] -%}
+      {%- if not _lb_ip -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'Service from pool ' ~ p ~ ' got no EXTERNAL-IP in 120s'}) -%}
+      {%- else -%}
+      {%-   set ranges = kmv_km.spec.networking.loadBalancer[role].addresses | default([], true) -%}
+      {%-   set inside = ranges | select('kmv_contains', _lb_ip) | list -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'pool ' ~ p ~ ' allocated ' ~ _lb_ip ~ ', inside loadBalancer.' ~ role} if inside
+                            else {'level': 'FAIL', 'msg': 'pool ' ~ p ~ ' allocated ' ~ _lb_ip ~ ', outside loadBalancer.' ~ role}) -%}
+      {%-   if (_lb_http_local.status | default(-1)) > 0 -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'http://' ~ _lb_ip ~ '/ answers from this machine'}) -%}
+      {%-   elif (_lb_http_cp.status | default(-1)) > 0 -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'http://' ~ _lb_ip ~ '/ answers from ' ~ groups['control_plane'][0]}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'http://' ~ _lb_ip ~ '/ does not answer from this machine'
+                                ~ ((' nor from ' ~ groups['control_plane'][0]) if kmv_have_env else '')}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

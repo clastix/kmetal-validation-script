@@ -1,0 +1,96 @@
+---
+# Defaults of every kmetal-validate setting. The inventory (group_vars) overrides them,
+# and `-e name=value` on the command line overrides both.
+
+# --- run -------------------------------------------------------------------------------
+kmv_version: "0.2.0"
+# kMetal release these playbooks validate.
+kmv_target_kmetal: "1.0.1"
+# Run ID labelled on every object a run creates. Empty: a random 5-digit number.
+kmv_run_id: ""
+# Keep the test resources (print the cleanup command instead of deleting them).
+kmv_keep: false
+# Run the end-to-end groups even when earlier groups failed.
+kmv_force_e2e: false
+# How long to wait for tenant clusters (s, m or h suffix).
+kmv_timeout_cluster: 30m
+# kubeconfig of the under cluster.
+kmv_kubeconfig: "{{ lookup('ansible.builtin.env', 'KUBECONFIG') | default('~/.kube/config', true) }}"
+
+# --- networks carrying a node IP (see docs/configuration.md) -------------------------------
+# name: {interface, vlan (0 or absent: not a VLAN device), cidr, mtu (optional)}
+# mgmt, tenant and overlay are required. Order = order of the checks and of the node table.
+kmv_networks: {}
+# The only network allowed to reach the internet from the nodes.
+kmv_internet_network: mgmt
+# Networks whose absence is a warning rather than a failure.
+kmv_optional_networks: []
+# Provider networks: workers only, the interface carries no IP. name: {interface, vlan}
+kmv_provider_networks: {}
+# Kube-OVN central nodes. Empty: read from the KMetal resource when a kubeconfig works.
+kmv_central_nodes: []
+
+# --- probes ----------------------------------------------------------------------------
+kmv_internet_probe_url: https://ghcr.io
+kmv_internet_probe_ip: 1.1.1.1
+kmv_dns_probe: ghcr.io
+# UDP port of the temporary tunnel built between two overlay nodes (not Kube-OVN's 6081).
+kmv_encap_test_port: 6090
+
+# --- kMetal installation ---------------------------------------------------------------
+kmv_operator_namespace: kmetal-operator-system
+kmv_operator_release: kmetal-operator
+kmv_ns_flux: kmetal-flux
+kmv_ns_metallb: kmetal-metallb
+kmv_ns_kubevirt: system-kubevirt
+kmv_ns_capi: kmetal-capi-providers
+kmv_ns_images: kmetal-image-builder
+# Fixed MetalLB pool names created by the operator (kMetal 1.0.1).
+kmv_pool_names:
+  tenantControlPlanes: tenant-cp-pool
+  management: mgmt-pool
+
+# --- end-to-end tests ------------------------------------------------------------------
+# Every environment gets this same subnet: the overlap is intentional.
+kmv_e2e_subnet_cidr: 10.250.0.0/24
+# Empty: kubevirt-standard, then kubevirt-expert, then kubevirt-kubeadm, then the first found.
+kmv_e2e_clusterclass: ""
+# Empty: the first entry of spec.clusterClass.values.osArtifact.tags.
+kmv_e2e_k8s_version: ""
+kmv_e2e_machine_size: small
+kmv_e2e_datastore: default
+kmv_e2e_workers_a: 2
+kmv_e2e_workers_b: 1
+kmv_e2e_tenant1_workers: 1
+kmv_e2e_tenant2_workers: 2
+kmv_e2e_pod_cidr: 10.93.0.0/16
+kmv_e2e_svc_cidr: 10.96.0.0/16
+# Images pulled by the test pods; point them at a mirror on air-gapped sites.
+kmv_test_image: nginx:alpine
+kmv_probe_image: busybox:1.36
+kmv_curl_image: curlimages/curl:8.10.1
+# How to reach tenant API servers: auto (direct, else SSH to a control plane), direct, ssh.
+kmv_tenant_access: auto
+# Node that runs tenant kubectl in ssh mode. Empty: the first control plane.
+kmv_tenant_kubectl_node: ""
+# Where an EIP is curled from: local, or a node name.
+kmv_eip_probe_from: local
+
+# --- internal constants ----------------------------------------------------------------
+kmv_label_key: kmetal-validate/run-id
+kmv_lbx_label: node.kubernetes.io/exclude-from-external-load-balancers
+kmv_network_label: node-role.kubernetes.io/network
+kmv_compute_label: node-role.kubernetes.io/compute
+kmv_cp_label: node-role.kubernetes.io/control-plane
+
+# --- per node (set in the inventory) ----------------------------------------------------
+# Address of the node on each network: {mgmt: 10.0.0.11, tenant: ...}; omit a network the
+# node is not on. "/len" is optional (default: the network's prefix).
+kmv_addresses: {}
+# cp or worker, from the inventory group.
+kmv_role: "{{ 'cp' if inventory_hostname in (groups['control_plane'] | default([])) else 'worker' }}"
+
+# --- summary ---------------------------------------------------------------------------
+# Fail the summary play when a check failed. site.yml turns it off for the under cluster
+# part, so the platform part still runs and the final summary covers both.
+kmv_summary_fail: true

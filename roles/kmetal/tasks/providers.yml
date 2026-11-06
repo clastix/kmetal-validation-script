@@ -1,0 +1,165 @@
+---
+# providers: every spec.networking.providerNetworks entry. Those whose interface is in the
+# inventory's kmv_provider_networks are the defaults (also checked by undercluster); the
+# others are additional networks managed by the platform. Subnets are canonical, the
+# gateway is inside, excludeIPs are inside, nothing overlaps; a subnet named "external"
+# exists (VPC external access); over SSH the interface is on every network node not in
+# excludeNodes, has carrier and no IPv4.
+
+- name: providers | nodes
+  ansible.builtin.command: kubectl get nodes -o json
+  register: _pv_nodes
+  changed_when: false
+  failed_when: false
+
+- name: providers | interface checks to run over SSH
+  ansible.builtin.set_fact:
+    _pv_network: >-
+      {{ ((_pv_nodes.stdout | from_json)['items'] if _pv_nodes.rc == 0 else [])
+         | selectattr('metadata.labels', 'defined') | selectattr('metadata.labels', 'contains', kmv_network_label)
+         | map(attribute='metadata.name') | list }}
+    _pv_all_nodes: "{{ ((_pv_nodes.stdout | from_json)['items'] if _pv_nodes.rc == 0 else []) | map(attribute='metadata.name') | list }}"
+    _pv_probes: >-
+      {%- set out = [] -%}
+      {%- set network = ((_pv_nodes.stdout | from_json)['items'] if _pv_nodes.rc == 0 else [])
+                        | selectattr('metadata.labels', 'defined') | selectattr('metadata.labels', 'contains', kmv_network_label)
+                        | map(attribute='metadata.name') | list -%}
+      {%- if kmv_have_env -%}
+      {%-   for pn in kmv_km.spec.networking.providerNetworks | default([], true) -%}
+      {%-     for n in network if n not in (pn.excludeNodes | default([], true)) and n in groups['kmetal_nodes'] -%}
+      {%-       set _ = out.append({'pn': pn.name, 'iface': pn.interface, 'node': n}) -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: providers | interface on the network nodes (SSH)
+  ansible.builtin.shell: |
+    ip -d -j link show dev {{ item.iface | quote }} 2>/dev/null || echo '[]'
+    ip -j -4 addr show dev {{ item.iface | quote }} 2>/dev/null || echo '[]'
+  delegate_to: "{{ item.node }}"
+  ignore_unreachable: true
+  loop: "{{ _pv_probes }}"
+  loop_control:
+    label: "{{ item.node }} {{ item.iface }}"
+  register: _pv_ssh
+  changed_when: false
+  failed_when: false
+
+- name: providers | verdicts
+  kmv_record:
+    group: providers
+    verdicts: >-
+      {%- set spec = kmv_km.spec | default({}) -%}
+      {%- set pns = spec.networking.providerNetworks | default([], true) -%}
+      {%- set v = [] -%}
+      {%- if not pns -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': 'no providerNetworks in the KMetal resource: tenants get no external access'}) -%}
+      {%- else -%}
+      {%-   set env_ifaces = (kmv_provider_networks | default({}, true)).values() | map(attribute='interface') | list -%}
+      {%-   set env_vlan = {} -%}
+      {%-   for p in (kmv_provider_networks | default({}, true)).values() if p.vlan | default(0, true) | int != 0 -%}{%- set _ = env_vlan.update({p.interface: p.vlan | int}) -%}{%- endfor -%}
+      {%-   set all_subnets = [] -%}
+      {%-   for pn in pns -%}{%- for s in pn.subnets | default([], true) -%}{%- set _ = all_subnets.append({'id': pn.name ~ '/' ~ s.name, 'name': s.name, 'cidr': s.cidrBlock | default('')}) -%}{%- endfor -%}{%- endfor -%}
+      {%-   set dflt = spec.networking.defaultProviderSubnet | default('', true) -%}
+      {%-   if not dflt -%}{%- set _ = v.append({'level': 'INFO', 'msg': 'defaultProviderSubnet not set'}) -%}
+      {%-   elif dflt in (all_subnets | map(attribute='name')) -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'defaultProviderSubnet ' ~ dflt ~ ' exists'}) -%}
+      {%-   else -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'defaultProviderSubnet ' ~ dflt ~ ' is not a subnet of any provider network'}) -%}
+      {%-   endif -%}
+      {%-   if 'external' in (all_subnets | map(attribute='name')) -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'a provider subnet named external exists (VPC external access)'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'no provider subnet is named external: tenant VPCs get no external access'}) -%}
+      {%-   endif -%}
+      {%-   for pn in pns -%}
+      {%-     set excl = pn.excludeNodes | default([], true) -%}
+      {%-     set origin = 'default' if kmv_have_env and pn.interface in env_ifaces else 'additional' -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': 'provider network ' ~ pn.name ~ ' (' ~ pn.interface ~ '): '
+                              ~ ('declared in the inventory, also checked by undercluster' if origin == 'default' else 'additional, not in the inventory; validated here')
+                              ~ (', created by the kMetal networking daemon (autoCreateVLANSubinterface)' if pn.autoCreateVLANSubinterface | default(false) else '')}) -%}
+      {%-     for n in excl if n not in _pv_all_nodes -%}
+      {%-       set _ = v.append({'level': 'WARN', 'msg': 'provider network ' ~ pn.name ~ ': excludeNodes entry ' ~ n ~ ' is not a node'}) -%}
+      {%-     endfor -%}
+      {%-     set ns = namespace(tagged=false) -%}
+      {%-     for s in pn.subnets | default([], true) -%}
+      {%-       set label = 'provider ' ~ pn.name ~ ' subnet ' ~ s.name -%}
+      {%-       set cidr = s.cidrBlock | default('') -%}
+      {%-       if (s.vlanID | default(0, true) | int) != 0 -%}{%- set ns.tagged = true -%}{%- endif -%}
+      {%-       if not (cidr | kmv_cidr_canonical) -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': label ~ ": cidrBlock '" ~ cidr ~ "' is not a network address"}) -%}
+      {%-       else -%}
+      {%-         if s.gateway | default('') -%}
+      {%-           set _ = v.append({'level': 'PASS', 'msg': label ~ ': ' ~ cidr ~ ', gateway ' ~ s.gateway ~ ', vlanID ' ~ s.vlanID | default(0)} if cidr | kmv_contains(s.gateway)
+                                    else {'level': 'FAIL', 'msg': label ~ ': gateway ' ~ s.gateway ~ ' is outside ' ~ cidr}) -%}
+      {%-         else -%}
+      {%-           set _ = v.append({'level': 'WARN', 'msg': label ~ ': no gateway'}) -%}
+      {%-         endif -%}
+      {%-         for ip in s.excludeIPs | default([], true) if not (ip | kmv_within(cidr)) -%}
+      {%-           set _ = v.append({'level': 'WARN', 'msg': label ~ ': excludeIPs entry ' ~ ip ~ ' is outside ' ~ cidr}) -%}
+      {%-         endfor -%}
+      {%-         for r in [spec.networking.kubeOVN.podCIDR | default(''), spec.networking.serviceCIDR | default(''), '100.64.0.0/16'] if r and r | kmv_overlaps(cidr) -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': label ~ ': ' ~ cidr ~ ' overlaps ' ~ r}) -%}
+      {%-         endfor -%}
+      {%-         if kmv_have_env -%}
+      {%-           for net, cfg in kmv_networks.items() if cfg.cidr | kmv_overlaps(cidr) -%}
+      {%-             set _ = v.append({'level': 'FAIL', 'msg': label ~ ': ' ~ cidr ~ ' overlaps node network ' ~ net ~ ' ' ~ cfg.cidr}) -%}
+      {%-           endfor -%}
+      {%-         endif -%}
+      {%-         for o in all_subnets if o.id != pn.name ~ '/' ~ s.name and o.cidr and o.cidr | kmv_overlaps(cidr) -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': label ~ ': ' ~ cidr ~ ' overlaps provider subnet ' ~ o.id ~ ' ' ~ o.cidr}) -%}
+      {%-         endfor -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     set targets = _pv_network | reject('in', excl) | list -%}
+      {%-     if not targets -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'provider network ' ~ pn.name ~ ': no network node left after excludeNodes (' ~ excl | join(' ') ~ ')'}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'INFO', 'msg': 'provider network ' ~ pn.name ~ ': OVN bridge on ' ~ pn.interface ~ ' on ' ~ targets | join(' ')
+                                ~ ((' (excluded: ' ~ excl | join(' ') ~ ')') if excl else '')}) -%}
+      {%-       if not kmv_have_env -%}
+      {%-         set _ = v.append({'level': 'INFO', 'msg': 'provider network ' ~ pn.name ~ ': no inventory, interface ' ~ pn.interface ~ ' not checked on the nodes'}) -%}
+      {%-       endif -%}
+      {%-       for n in targets if kmv_have_env and n not in groups['kmetal_nodes'] -%}
+      {%-         set _ = v.append({'level': 'INFO', 'msg': n ~ ': not in the inventory, ' ~ pn.interface ~ ' not checked'}) -%}
+      {%-       endfor -%}
+      {%-       for r in _pv_ssh.results | default([]) if r.item.pn == pn.name -%}
+      {%-         set n = r.item.node -%}
+      {%-         set out = r.stdout_lines | default([]) -%}
+      {%-         set l = ((out[0] | default('[]')) | from_json | first | default({})) if r.rc | default(1) == 0 else {} -%}
+      {%-         if r.rc | default(1) != 0 or r.unreachable | default(false) -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': n ~ ': cannot query ' ~ pn.interface ~ ' over SSH'}) -%}
+      {%-         elif not l -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': n ~ ': provider ' ~ pn.name ~ ' interface ' ~ pn.interface ~ ' missing ('
+                                      ~ ('the networking daemon should have created it' if pn.autoCreateVLANSubinterface | default(false) else 'add ' ~ n ~ ' to excludeNodes if it has no such NIC') ~ ')'}) -%}
+      {%-         else -%}
+      {%-           set kind = l.linkinfo.info_kind | default('device') -%}
+      {%-           set vid = l.linkinfo.info_data.id | default('') -%}
+      {%-           set ipv4 = [] -%}
+      {%-           for a in (out[1] | default('[]')) | from_json -%}{%- for i in a.addr_info | default([]) if i.family == 'inet' -%}{%- set _ = ipv4.append(i.local) -%}{%- endfor -%}{%- endfor -%}
+      {%-           set problems = [] -%}
+      {%-           if 'LOWER_UP' not in l.flags | default([]) -%}{%- set _ = problems.append('no carrier (' ~ l.flags | default([]) | join(',') ~ ')') -%}{%- endif -%}
+      {%-           if ipv4 -%}{%- set _ = problems.append('carries IPv4 ' ~ ipv4 | join(' ')) -%}{%- endif -%}
+      {%-           if problems -%}
+      {%-             set _ = v.append({'level': 'FAIL', 'msg': n ~ ': provider ' ~ pn.name ~ ' ' ~ pn.interface ~ ': ' ~ problems | kmv_joinc}) -%}
+      {%-           else -%}
+      {%-             set _ = v.append({'level': 'PASS', 'msg': n ~ ': ' ~ pn.interface ~ ' (provider ' ~ pn.name ~ ') up, no IPv4, '
+                                        ~ (('VLAN ' ~ vid ~ ' device') if kind == 'vlan' else kind) ~ ((', attached to ' ~ l.master) if l.master | default('') else '')}) -%}
+      {%-           endif -%}
+      {%-           if kind == 'vlan' and ns.tagged -%}
+      {%-             set _ = v.append({'level': 'WARN', 'msg': n ~ ': ' ~ pn.interface ~ ' is already a kernel VLAN device (VLAN ' ~ vid ~ ') and ' ~ pn.name
+                                        ~ ' subnets set a vlanID: frames would be tagged twice and dropped; use vlanID 0'}) -%}
+      {%-           endif -%}
+      {%-           if origin == 'default' and pn.interface in env_vlan and kind == 'vlan' and vid | string != env_vlan[pn.interface] | string -%}
+      {%-             set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ pn.interface ~ ' has VLAN ' ~ vid ~ ', the inventory expects ' ~ env_vlan[pn.interface]}) -%}
+      {%-           endif -%}
+      {%-         endif -%}
+      {%-       endfor -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if kmv_have_env -%}
+      {%-     for name, p in (kmv_provider_networks | default({}, true)).items() if p.interface not in (pns | map(attribute='interface')) -%}
+      {%-       set _ = v.append({'level': 'WARN', 'msg': 'inventory provider network ' ~ name ~ ' (' ~ p.interface ~ ') is not a providerNetwork of the KMetal resource'}) -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

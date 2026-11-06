@@ -1,0 +1,141 @@
+---
+# nodes (kMetal 1.0.1 rules):
+#  - control planes: no node.kubernetes.io/exclude-from-external-load-balancers (the operator
+#    removes it, so its presence means the node labelling controller is not working);
+#  - compute: node-role.kubernetes.io/compute, with a Ready virt-handler;
+#  - network nodes: node-role.kubernetes.io/network with an EMPTY value (never control
+#    planes), ovn.kubernetes.io/external-gw=true (set by the operator), a Ready
+#    kube-ovn-cni and the tunnelInterface; kmetal.io/ovn is no longer read;
+#  - centralNodes: kube-ovn/role=master (set by the operator); ideally the three control
+#    planes, an odd number, at least three.
+
+- name: nodes | nodes, virt-handler and kube-ovn-cni pods
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get nodes -o json
+    - kubectl get pods -n {{ kmv_ns_kubevirt }} -l kubevirt.io=virt-handler -o json
+    - kubectl get pods -A -l app=kube-ovn-cni -o json
+  register: _nd_read
+  changed_when: false
+  failed_when: false
+
+- name: nodes | facts
+  ansible.builtin.set_fact:
+    _nd: >-
+      {%- set items = (_nd_read.results[0].stdout | from_json)['items'] if _nd_read.results[0].rc == 0 else [] -%}
+      {%- set labels = {} -%}
+      {%- for n in items -%}{%- set _ = labels.update({n.metadata.name: n.metadata.labels | default({})}) -%}{%- endfor -%}
+      {%- set vh = ((_nd_read.results[1].stdout | from_json)['items'] if _nd_read.results[1].rc == 0 else []) | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
+      {%- set cni = ((_nd_read.results[2].stdout | from_json)['items'] if _nd_read.results[2].rc == 0 else []) | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
+      {%- set out = {'labels': labels, 'vh': vh, 'cni': cni, 'cps': [], 'compute': [], 'network': [], 'ovn_old': []} -%}
+      {%- for name, l in labels.items() -%}
+      {%-   if kmv_cp_label in l -%}{%- set _ = out.cps.append(name) -%}{%- endif -%}
+      {%-   if kmv_compute_label in l -%}{%- set _ = out.compute.append(name) -%}{%- endif -%}
+      {%-   if kmv_network_label in l -%}{%- set _ = out.network.append(name) -%}{%- endif -%}
+      {%-   if 'kmetal.io/ovn' in l -%}{%- set _ = out.ovn_old.append(name) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+    _nd_tif: "{{ kmv_km.spec.networking.kubeOVN.tunnelInterface | default('', true) }}"
+
+- name: nodes | tunnel interface on the network nodes (SSH)
+  ansible.builtin.command: ip link show dev {{ _nd_tif }}
+  delegate_to: "{{ item }}"
+  ignore_unreachable: true
+  loop: "{{ _nd.network | select('in', groups['kmetal_nodes'] | default([])) | list }}"
+  register: _nd_tun
+  changed_when: false
+  failed_when: false
+  when: kmv_have_env and _nd_tif | length > 0
+
+- name: nodes | verdicts
+  kmv_record:
+    group: nodes
+    verdicts: >-
+      {%- set L = _nd.labels -%}
+      {%- set v = [] -%}
+      {%- if not _nd.compute -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'no node labelled ' ~ kmv_compute_label ~ ': no tenant machine or image-builder VM can start'}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'compute nodes: ' ~ _nd.compute | join(' ')}) -%}
+      {%-   for n in _nd.compute -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': virt-handler Ready'} if n in _nd.vh else {'level': 'FAIL', 'msg': n ~ ': no Ready virt-handler pod'}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- for n in _nd.cps -%}
+      {%-   if kmv_lbx_label in L[n] -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ kmv_lbx_label ~ ' is set; MetalLB does not announce from this control plane. kMetal '
+                                ~ kmv_target_kmetal ~ ' removes it: check the operator (kubectl label node ' ~ n ~ ' ' ~ kmv_lbx_label ~ '-)'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': no ' ~ kmv_lbx_label ~ ' label, MetalLB can announce from it'}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if not _nd.network -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'no node labelled ' ~ kmv_network_label ~ "=: Kube-OVN's per-node DaemonSets run nowhere (kubectl label node <node> " ~ kmv_network_label ~ '=)'}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'network nodes (' ~ kmv_network_label ~ '): ' ~ _nd.network | join(' ')}) -%}
+      {%-   for n in _nd.network -%}
+      {%-     if L[n][kmv_network_label] != '' -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ kmv_network_label ~ '=' ~ L[n][kmv_network_label] ~ "; the value must be empty, Kube-OVN's DaemonSets do not match it (kubectl label node "
+                                  ~ n ~ ' --overwrite ' ~ kmv_network_label ~ '=)'}) -%}
+      {%-     endif -%}
+      {%-     if n in _nd.cps -%}
+      {%-       set _ = v.append({'level': 'WARN', 'msg': n ~ ': control plane labelled ' ~ kmv_network_label ~ '; the label belongs on network nodes only'}) -%}
+      {%-     endif -%}
+      {%-     if L[n]['ovn.kubernetes.io/external-gw'] | default('') == 'true' -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': n ~ ': ovn.kubernetes.io/external-gw=true'}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ": ovn.kubernetes.io/external-gw=true missing: the operator's node labelling controller did not apply it"}) -%}
+      {%-     endif -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': kube-ovn-cni Ready'} if n in _nd.cni else {'level': 'FAIL', 'msg': n ~ ': no Ready kube-ovn-cni pod'}) -%}
+      {%-   endfor -%}
+      {%-   for r in _nd_tun.results | default([]) if not (r.skipped | default(false)) -%}
+      {%-     if r.unreachable | default(false) -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': r.item ~ ': cannot check tunnelInterface ' ~ _nd_tif ~ ' over SSH: node unreachable'}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': r.item ~ ': tunnelInterface ' ~ _nd_tif ~ ' present'} if r.rc | default(1) == 0
+                                else {'level': 'FAIL', 'msg': r.item ~ ': tunnelInterface ' ~ _nd_tif ~ ' missing on a network node'}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- for n in _nd.ovn_old -%}
+      {%-   if n in _nd.network -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ': kmetal.io/ovn is no longer read by kMetal ' ~ kmv_target_kmetal ~ ' and can be removed'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': n ~ ': labelled kmetal.io/ovn but not ' ~ kmv_network_label ~ '; kMetal ' ~ kmv_target_kmetal
+                                ~ ' runs Kube-OVN only on ' ~ kmv_network_label ~ ' nodes (relabel: kubectl label node ' ~ n ~ ' ' ~ kmv_network_label ~ '=)'}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set central = kmv_km.spec.networking.kubeOVN.centralNodes | default([], true) -%}
+      {%- set ns = namespace(cpc=0) -%}
+      {%- if not central -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'spec.networking.kubeOVN.centralNodes is empty'}) -%}
+      {%- else -%}
+      {%-   for n in central -%}
+      {%-     if n not in L -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'central node ' ~ n ~ ' is not a node of the cluster'}) -%}
+      {%-     else -%}
+      {%-       if L[n]['kube-ovn/role'] | default('') == 'master' -%}
+      {%-         set _ = v.append({'level': 'PASS', 'msg': n ~ ': kube-ovn/role=master (central node)'}) -%}
+      {%-       else -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': n ~ ": kube-ovn/role=master missing on a central node: the operator's node labelling controller did not apply it"}) -%}
+      {%-       endif -%}
+      {%-       if n in _nd.cps -%}{%- set ns.cpc = ns.cpc + 1 -%}
+      {%-       else -%}{%- set _ = v.append({'level': 'WARN', 'msg': n ~ ': worker listed in centralNodes; ovn-central belongs on the control planes'}) -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if _nd.cps | length >= 3 and ns.cpc < 3 -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'centralNodes lists ' ~ ns.cpc ~ ' control plane(s); list three control planes (available: '
+                                ~ (_nd.cps | reject('in', central) | join(' ')) ~ ')'}) -%}
+      {%-   endif -%}
+      {%-   set nc = central | length -%}
+      {%-   if nc < 3 or nc % 2 == 0 -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': nc ~ ' central node(s): fill centralNodes to three nodes (control planes, or workers when fewer control planes exist) for OVSDB Raft consensus'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': nc ~ ' central nodes (' ~ ns.cpc ~ ' of them control planes): Raft keeps quorum through the loss of ' ~ ((nc - 1) // 2)}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {%- for name, l in L.items() if l['kube-ovn/role'] | default('') == 'master' and name not in central -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': name ~ ' carries kube-ovn/role=master but is not in centralNodes'}) -%}
+      {%- endfor -%}
+      {{ v }}

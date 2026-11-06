@@ -1,0 +1,115 @@
+---
+# Tenant API access for environment `key`: read the <cluster>-kubeconfig Secret, point it at
+# the control plane's LoadBalancer address, and decide where tenant kubectl runs:
+# directly from this machine, or (kmv_tenant_access=ssh, or auto when the API is not
+# reachable from here) on a control plane over SSH. Sets _e2e_tk[key] = {host, kc}.
+
+- name: access {{ key }} | kubeconfig Secret and control plane Service
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get secret {{ _e2e_envs[key].cluster }}-kubeconfig -n {{ _e2e_envs[key].ns }} -o jsonpath={.data.value}
+    - kubectl get svc -n {{ _e2e_envs[key].ns }} -o json
+  register: _ac_read
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: access {{ key }} | control plane address
+  ansible.builtin.set_fact:
+    _ac_kc: "{{ _ac_read.results[0].stdout | default('') | b64decode if _ac_read.results[0].rc == 0 else '' }}"
+    _ac_api: >-
+      {%- set svcs = (_ac_read.results[1].stdout | from_json)['items'] if _ac_read.results[1].rc == 0 else [] -%}
+      {%- set s = {} -%}
+      {%- for x in svcs if not s and x.spec.type == 'LoadBalancer'
+                          and ((x.metadata.labels | default({}))['kamaji.clastix.io/name'] | default('') == _e2e_envs[key].cluster or x.metadata.name == _e2e_envs[key].cluster) -%}
+      {%-   set _ = s.update(x) -%}
+      {%- endfor -%}
+      {{ {'ip': (s.status.loadBalancer.ingress | default([{}], true) | first).ip | default(''), 'port': (s.spec.ports | default([{}], true) | first).port | default(6443)} }}
+  no_log: true
+
+- name: access {{ key }} | reachable from this machine
+  ansible.builtin.uri:
+    url: "https://{{ _ac_api.ip }}:{{ _ac_api.port }}/healthz"
+    validate_certs: false
+    timeout: 5
+    status_code: [-1, 200, 401, 403, 500]
+  register: _ac_direct
+  failed_when: false
+  when: _ac_kc | length > 0 and _ac_api.ip | length > 0 and kmv_tenant_access == 'auto'
+
+- name: access {{ key }} | mode
+  ansible.builtin.set_fact:
+    _ac_mode: >-
+      {{ kmv_tenant_access if kmv_tenant_access != 'auto'
+         else ('direct' if (_ac_direct.status | default(-1)) > 0 else ('ssh' if kmv_have_env else 'none')) }}
+
+- name: access {{ key }} | reachable from {{ _e2e_tk_node }}
+  ansible.builtin.shell: |
+    command -v kubectl >/dev/null || { echo nokubectl; exit 0; }
+    curl -sk -o /dev/null -m 5 -w '%{http_code}' https://{{ _ac_api.ip }}:{{ _ac_api.port }}/healthz
+  delegate_to: "{{ _e2e_tk_node or 'localhost' }}"
+  ignore_unreachable: true
+  register: _ac_ssh
+  changed_when: false
+  failed_when: false
+  when: _ac_kc | length > 0 and _ac_api.ip | length > 0 and _ac_mode == 'ssh' and kmv_have_env and _e2e_tk_node | length > 0
+
+- name: access {{ key }} | usable
+  ansible.builtin.set_fact:
+    _ac_host: >-
+      {{ 'localhost' if _ac_mode == 'direct'
+         else (_e2e_tk_node if (_ac_mode == 'ssh' and (_ac_ssh.stdout | default('000')) not in ['000', 'nokubectl', ''] and _ac_ssh.rc | default(1) == 0) else '') }}
+
+- name: access {{ key }} | temporary kubeconfig
+  when: _ac_kc | length > 0 and _ac_api.ip | length > 0 and _ac_host | length > 0
+  block:
+    - name: access {{ key }} | temporary file on {{ _ac_host }}
+      ansible.builtin.tempfile:
+        prefix: kmv-kc-
+      delegate_to: "{{ _ac_host or 'localhost' }}"
+      ignore_unreachable: true
+      register: _ac_tmp
+
+    - name: access {{ key }} | write the kubeconfig (0600)
+      ansible.builtin.copy:
+        content: "{{ _ac_kc | regex_replace('(?m)^(\\s*server:\\s*).*$', '\\g<1>https://' ~ _ac_api.ip ~ ':' ~ _ac_api.port) }}"
+        dest: "{{ _ac_tmp.path }}"
+        mode: "0600"
+      delegate_to: "{{ _ac_host or 'localhost' }}"
+      ignore_unreachable: true
+      no_log: true
+
+    - name: access {{ key }} | remember it
+      ansible.builtin.set_fact:
+        _e2e_tk: "{{ _e2e_tk | combine({key: {'host': _ac_host, 'kc': _ac_tmp.path}}) }}"
+
+- name: access {{ key }} | verdicts
+  kmv_record:
+    group: "{{ _e2e_envs[key].group }}"
+    verdicts: >-
+      {%- set e = _e2e_envs[key] -%}
+      {%- set api = _ac_api.ip ~ ':' ~ _ac_api.port -%}
+      {%- set v = [] -%}
+      {%- if not _ac_kc -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': e.ns ~ ': Secret ' ~ e.cluster ~ '-kubeconfig missing'}) -%}
+      {%- elif not _ac_api.ip -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': e.ns ~ ': no LoadBalancer address for the ' ~ e.cluster ~ ' control plane'}) -%}
+      {%- else -%}
+      {%-   set inside = kmv_km.spec.networking.loadBalancer.tenantControlPlanes.addresses | default([], true) | select('kmv_contains', _ac_api.ip) | list -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': e.cluster ~ ' control plane on ' ~ api ~ ' (tenantControlPlanes pool)'} if inside
+                            else {'level': 'WARN', 'msg': e.cluster ~ ' control plane on ' ~ api ~ ', outside loadBalancer.tenantControlPlanes'}) -%}
+      {%-   if _ac_mode == 'none' -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'tenant API ' ~ api ~ ' unreachable from here and no inventory nodes for an SSH hop'}) -%}
+      {%-   elif _ac_mode == 'ssh' and not kmv_have_env -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'kmv_tenant_access=ssh needs inventory nodes'}) -%}
+      {%-   elif _ac_mode == 'ssh' and (_ac_ssh.stdout | default('')) == 'nokubectl' -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'kubectl not installed on ' ~ _e2e_tk_node}) -%}
+      {%-   elif _ac_mode == 'ssh' and not _ac_host -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'tenant API ' ~ api ~ ' unreachable from ' ~ _e2e_tk_node ~ ' (tenant VLAN / L2 advertisement)'}) -%}
+      {%-   elif _ac_mode == 'ssh' -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'tenant API ' ~ api ~ ' reachable from ' ~ _e2e_tk_node ~ '; tenant kubectl runs there'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'tenant API ' ~ api ~ ' reachable from this machine'}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

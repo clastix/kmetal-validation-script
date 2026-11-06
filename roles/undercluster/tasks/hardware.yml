@@ -1,0 +1,37 @@
+---
+# hardware: lab minimum per node (8 CPU, 16 GiB RAM, 100 GB root, 1 Gb/s on the physical
+# parent of the mgmt interface); INFO below the production profile.
+
+- name: hardware | verdicts
+  kmv_record:
+    group: hardware
+    verdicts: >-
+      {%- set f = ansible_facts -%}
+      {%- set n = inventory_hostname -%}
+      {%- set cpu = f.processor_nproc | default(f.processor_vcpus | default(0)) | int -%}
+      {%- set mem_g = (f.memtotal_mb | default(0) | int) // 1024 -%}
+      {%- set root = f.mounts | default([]) | selectattr('mount', 'eq', '/') | first | default({}) -%}
+      {%- set root_g = ((root.size_total | default(0) | int) / 1000000000) | int -%}
+      {%- set parent = kmv_n.links | kmv_link_parent(kmv_networks.mgmt.interface) -%}
+      {%- set speed = kmv_n.misc['speed_' ~ parent] | default('') -%}
+      {%- set v = [] -%}
+      {%- set low = [] -%}
+      {%- if cpu < 8 -%}{%- set _ = low.append(cpu ~ ' CPU < 8') -%}{%- endif -%}
+      {%- if mem_g < 15 -%}{%- set _ = low.append(mem_g ~ ' GiB RAM < 16') -%}{%- endif -%}
+      {%- if root_g < 95 -%}{%- set _ = low.append(root_g ~ ' GB root filesystem < 100') -%}{%- endif -%}
+      {%- set speed_ok = speed is match('^[0-9]+$') and speed | int > 0 -%}
+      {%- if speed_ok -%}
+      {%-   if speed | int < 1000 -%}{%- set _ = low.append(parent ~ ' ' ~ speed ~ ' Mb/s < 1 Gb/s') -%}{%- endif -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': n ~ ': link speed of ' ~ parent ~ ' unknown'}) -%}
+      {%- endif -%}
+      {%- if low | length > 0 -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': n ~ ' below the lab minimum: ' ~ (low | kmv_joinc)}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': n ~ ': ' ~ cpu ~ ' CPU, ' ~ mem_g ~ ' GiB RAM, ' ~ root_g ~ ' GB root, '
+                             ~ parent ~ ' ' ~ (speed if speed_ok else '?') ~ ' Mb/s'}) -%}
+      {%-   if cpu < 16 or mem_g < 60 or root_g < 475 or (speed_ok and speed | int < 10000) -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ' is below the production profile (16 CPU, 64 GB RAM, 500 GB NVMe, 10 Gb/s)'}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

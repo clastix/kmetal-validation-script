@@ -1,0 +1,59 @@
+---
+# addressing (localhost): the node networks do not overlap each other; with a KMetal
+# resource, nor kubeOVN.podCIDR, serviceCIDR, 100.64.0.0/16 (Kube-OVN join) and the provider
+# subnets; and the MetalLB ranges lie inside their network, clear of node addresses.
+
+- name: addressing | verdicts
+  kmv_record:
+    group: addressing
+    verdicts: >-
+      {%- set nets = kmv_networks -%}
+      {%- set names = nets.keys() | list -%}
+      {%- set v = [] -%}
+      {%- for i in range(names | length) -%}
+      {%-   for j in range(i + 1, names | length) -%}
+      {%-     set a, b = names[i], names[j] -%}
+      {%-     if nets[a].cidr | kmv_overlaps(nets[b].cidr) -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': a ~ ' ' ~ nets[a].cidr ~ ' overlaps ' ~ b ~ ' ' ~ nets[b].cidr}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {%- set desc = [] -%}
+      {%- for name, cfg in nets.items() -%}{%- set _ = desc.append(name ~ '=' ~ cfg.cidr) -%}{%- endfor -%}
+      {%- if not v -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'node networks do not overlap: ' ~ desc | join(' ')}) -%}{%- endif -%}
+      {%- if not kmv_km -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'no KMetal resource reachable: pod/service/provider/LB ranges not cross-checked'}) -%}
+      {%- else -%}
+      {%-   set spec = kmv_km.spec | default({}) -%}
+      {%-   set other = {'kubeOVN.podCIDR': spec.networking.kubeOVN.podCIDR | default(''),
+                         'serviceCIDR': spec.networking.serviceCIDR | default(''),
+                         'Kube-OVN join': '100.64.0.0/16'} -%}
+      {%-   for pn in spec.networking.providerNetworks | default([], true) -%}
+      {%-     for s in pn.subnets | default([], true) -%}{%- set _ = other.update({'provider subnet ' ~ s.name: s.cidrBlock | default('')}) -%}{%- endfor -%}
+      {%-   endfor -%}
+      {%-   set before = v | length -%}
+      {%-   for r, cidr in other.items() if cidr -%}
+      {%-     for net, cfg in nets.items() if cidr | kmv_overlaps(cfg.cidr) -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': r ~ ' ' ~ cidr ~ ' overlaps node network ' ~ net ~ ' ' ~ cfg.cidr}) -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%-   set desc = [] -%}
+      {%-   for r, cidr in other.items() if cidr -%}{%- set _ = desc.append(r | replace(' ', '_') ~ '=' ~ cidr) -%}{%- endfor -%}
+      {%-   if v | length == before -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'no overlap with the KMetal ranges: ' ~ desc | join(' ')}) -%}{%- endif -%}
+      {%-   for role, net in [['tenantControlPlanes', 'tenant'], ['management', 'mgmt']] -%}
+      {%-     for r in spec.networking.loadBalancer[role].addresses | default([], true) -%}
+      {%-       if not (r | kmv_within(nets[net].cidr)) -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': 'loadBalancer.' ~ role ~ ' range ' ~ r ~ ' is outside the ' ~ net ~ ' network ' ~ nets[net].cidr}) -%}
+      {%-       else -%}
+      {%-         set clash = [] -%}
+      {%-         for n in kmv_nodes if net in n.addr and (r | kmv_contains(n.addr[net] | kmv_ip)) -%}{%- set _ = clash.append(n.name) -%}{%- endfor -%}
+      {%-         if clash -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': 'loadBalancer.' ~ role ~ ' range ' ~ r ~ ' contains node addresses of: ' ~ clash | join(' ')}) -%}
+      {%-         else -%}
+      {%-           set _ = v.append({'level': 'PASS', 'msg': 'loadBalancer.' ~ role ~ ' range ' ~ r ~ ' is inside ' ~ net ~ ' and clear of node addresses'}) -%}
+      {%-         endif -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ v }}

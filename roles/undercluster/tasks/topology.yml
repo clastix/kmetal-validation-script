@@ -1,0 +1,52 @@
+---
+# topology (localhost): cluster size from the inventory groups; with a working kubeconfig,
+# the node list and InternalIPs compared with the cluster, and no control plane carrying
+# node.kubernetes.io/exclude-from-external-load-balancers.
+
+- name: topology | read the cluster nodes
+  ansible.builtin.command: kubectl get nodes -o json
+  register: _uc_knodes
+  changed_when: false
+  failed_when: false
+  when: kmv_have_kube
+
+- name: topology | verdicts
+  kmv_record:
+    group: topology
+    verdicts: >-
+      {%- set ncp = kmv_nodes | selectattr('role', 'eq', 'cp') | list | length -%}
+      {%- set nwk = kmv_nodes | selectattr('role', 'eq', 'worker') | list | length -%}
+      {%- set v = [] -%}
+      {%- if ncp < 1 or nwk < 2 -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': ncp ~ ' control planes and ' ~ nwk ~ ' workers: the minimum lab is 1 control plane and 2 workers'}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': ncp ~ ' control planes and ' ~ nwk ~ ' workers (minimum lab: 1 + 2)'}) -%}
+      {%- endif -%}
+      {%- if ncp < 3 -%}{%- set _ = v.append({'level': 'WARN', 'msg': ncp ~ ' control planes: the documented minimum and production layout is 3'}) -%}{%- endif -%}
+      {%- if ncp % 2 == 0 -%}{%- set _ = v.append({'level': 'WARN', 'msg': ncp ~ ' control planes: use an odd number for etcd quorum'}) -%}{%- endif -%}
+      {%- if not kmv_have_kube or (_uc_knodes.rc | default(1)) != 0 -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'no working kubeconfig: node list and node labels not compared with the cluster'}) -%}
+      {%- else -%}
+      {%-   set items = (_uc_knodes.stdout | from_json)['items'] -%}
+      {%-   set known = {} -%}
+      {%-   for k in items -%}
+      {%-     set labels = k.metadata.labels | default({}) -%}
+      {%-     set ip = k.status.addresses | default([]) | selectattr('type', 'eq', 'InternalIP') | map(attribute='address') | first | default('') -%}
+      {%-     set _ = known.update({k.metadata.name: ip}) -%}
+      {%-     if kmv_cp_label in labels and kmv_lbx_label in labels -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': k.metadata.name ~ ': ' ~ kmv_lbx_label ~ ' is set on a control plane; MetalLB speakers must announce from it'
+                                  ~ ' (kMetal ' ~ kmv_target_kmetal ~ ' removes it: check the operator; kubectl label node ' ~ k.metadata.name ~ ' ' ~ kmv_lbx_label ~ '-)'}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   for n in kmv_nodes -%}
+      {%-     set mgmt = n.addr.mgmt | kmv_ip -%}
+      {%-     if n.name not in known -%}{%- set _ = v.append({'level': 'WARN', 'msg': n.name ~ ' is not a node of the cluster'}) -%}
+      {%-     elif known[n.name] != mgmt -%}{%- set _ = v.append({'level': 'WARN', 'msg': n.name ~ ': InternalIP is ' ~ known[n.name] ~ ', the inventory has mgmt ' ~ mgmt}) -%}
+      {%-     else -%}{%- set _ = v.append({'level': 'PASS', 'msg': n.name ~ ': registered, InternalIP ' ~ mgmt}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   for name in known if name not in (kmv_nodes | map(attribute='name')) -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'cluster node ' ~ name ~ ' is missing from the inventory'}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ v }}

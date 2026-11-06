@@ -1,0 +1,42 @@
+---
+# capi: one core (cluster-api), bootstrap (kubeadm), infrastructure (kubevirt) and
+# control-plane (kamaji) provider in kmetal-capi-providers, each Ready; at least one
+# ClusterClass, and the one the end-to-end tests will use.
+
+- name: capi | providers
+  ansible.builtin.command: kubectl get {{ item }}.operator.cluster.x-k8s.io -n {{ kmv_ns_capi }} -o json
+  loop: [coreproviders, bootstrapproviders, infrastructureproviders, controlplaneproviders]
+  register: _capi_read
+  changed_when: false
+  failed_when: false
+
+- name: capi | ClusterClasses
+  ansible.builtin.import_tasks: resolve_cc.yml
+
+- name: capi | verdicts
+  kmv_record:
+    group: capi
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- set kw = {'coreproviders': 'cluster-api', 'bootstrapproviders': 'kubeadm', 'infrastructureproviders': 'kubevirt', 'controlplaneproviders': 'kamaji'} -%}
+      {%- for r in _capi_read.results -%}
+      {%-   if r.rc != 0 -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': r.item ~ ' API not served'}) -%}
+      {%-   else -%}
+      {%-     set p = (r.stdout | from_json)['items'] | selectattr('metadata.name', 'search', kw[r.item]) | first | default({}) -%}
+      {%-     if not p -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'no ' ~ r.item ~ " matching '" ~ kw[r.item] ~ "' in " ~ kmv_ns_capi}) -%}
+      {%-     else -%}
+      {%-       set ready = (p | kmv_condition('Ready')) or 'Unknown' -%}
+      {%-       set ver = p.status.installedVersion | default(p.spec.version | default('?')) -%}
+      {%-       set _ = v.append({'level': 'PASS' if ready == 'True' else 'FAIL', 'msg': r.item ~ ' ' ~ p.metadata.name ~ ' ' ~ ver ~ (' Ready' if ready == 'True' else ' Ready=' ~ ready)}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set _ = v.append({'level': 'PASS', 'msg': 'ClusterClasses in ' ~ kmv_ns_capi ~ ': ' ~ kmv_ccs | join(' ')} if kmv_ccs
+                          else {'level': 'FAIL', 'msg': 'no ClusterClass in ' ~ kmv_ns_capi}) -%}
+      {%- if kmv_e2e_clusterclass and not kmv_cc -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'kmv_e2e_clusterclass ' ~ kmv_e2e_clusterclass ~ ' does not exist in ' ~ kmv_ns_capi}) -%}
+      {%- endif -%}
+      {%- if kmv_cc -%}{%- set _ = v.append({'level': 'INFO', 'msg': 'e2e will use ClusterClass ' ~ kmv_cc}) -%}{%- endif -%}
+      {{ v }}

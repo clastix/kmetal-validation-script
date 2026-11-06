@@ -1,0 +1,77 @@
+---
+# One storage class (_sc.key: uc | tenant | etcd, _sc.value: class name): a 1 Gi PVC and a
+# pod that writes, syncs and reads it. Platform and tenant classes run on compute nodes,
+# the etcd class follows spec.placement (control planes by default).
+
+- name: storage | PVC pvc-{{ _sc.key }} and pod w-{{ _sc.key }} on {{ _sc.value }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: List
+      items:
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata: {name: "pvc-{{ _sc.key }}", namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+          spec:
+            accessModes: [ReadWriteOnce]
+            volumeMode: Filesystem
+            storageClassName: "{{ _sc.value }}"
+            resources: {requests: {storage: 1Gi}}
+        - "{{ _pod }}"
+  vars:
+    _placement: >-
+      {%- if _sc.key == 'etcd' -%}
+      {{ {'nodeSelector': kmv_km.spec.placement.nodeSelector | default({kmv_cp_label: ''}, true),
+          'tolerations': kmv_km.spec.placement.tolerations | default([{'key': kmv_cp_label, 'operator': 'Exists', 'effect': 'NoSchedule'}], true)} }}
+      {%- else -%}
+      {{ {'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms':
+          [{'matchExpressions': [{'key': kmv_compute_label, 'operator': 'Exists'}]}]}}}} }}
+      {%- endif -%}
+    _pod:
+      apiVersion: v1
+      kind: Pod
+      metadata: {name: "w-{{ _sc.key }}", namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+      spec: >-
+        {{ {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 1,
+            'containers': [{'name': 'c', 'image': kmv_probe_image,
+                            'command': ['sh', '-c', 'echo kmetal-validate > /data/probe && sync && cat /data/probe'],
+                            'volumeMounts': [{'name': 'd', 'mountPath': '/data'}]}],
+            'volumes': [{'name': 'd', 'persistentVolumeClaim': {'claimName': 'pvc-' ~ _sc.key}}]} | combine(_placement) }}
+  register: _st_apply
+  ignore_errors: true
+
+- name: storage | wait for w-{{ _sc.key }}
+  kubernetes.core.k8s_info:
+    kind: Pod
+    name: "w-{{ _sc.key }}"
+    namespace: "{{ kmv_test_ns }}"
+  register: _st_pod
+  until: (_st_pod.resources[0].status.phase | default('')) in ['Succeeded', 'Failed']
+  retries: 100
+  delay: 3
+  failed_when: false
+  when: not (_st_apply.failed | default(false))
+
+- name: storage | result of {{ _sc.value }}
+  ansible.builtin.set_fact:
+    _st_smoke_ok: "{{ _st_smoke_ok | default({}) | combine({_sc.key: (_st_pod.resources[0].status.phase | default('')) == 'Succeeded'}) }}"
+
+- name: storage | diagnostics for w-{{ _sc.key }}
+  ansible.builtin.include_tasks:
+    file: pod_diag.yml
+    apply:
+      tags: [storage]
+  vars:
+    _diag_ns: "{{ kmv_test_ns }}"
+    _diag_pod: "w-{{ _sc.key }}"
+    _diag_pvc: "pvc-{{ _sc.key }}"
+  when: not _st_smoke_ok[_sc.key]
+
+- name: storage | verdict for {{ _sc.value }}
+  kmv_record:
+    group: storage
+    verdicts:
+      - "{{ {'level': 'PASS', 'msg': _sc.value ~ ': PVC Bound, write/read OK on ' ~ _st_pod.resources[0].spec.nodeName | default('?')}
+            if _st_smoke_ok[_sc.key] else
+            {'level': 'FAIL', 'msg': _sc.value ~ ': PVC/pod smoke test did not complete in 300s'} }}"

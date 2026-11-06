@@ -1,0 +1,32 @@
+---
+# Scenario e2e-tenants, checks: per tenant cluster that came up, tenant API access, nodes
+# and egress; overlap and traffic isolation between t1 and t2.
+
+- name: e2e-tenants | tenant API access
+  ansible.builtin.include_tasks:
+    file: access.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: "{{ ['t1', 't2'] | select('in', _e2e_up) | list }}"
+  loop_control:
+    loop_var: key
+
+- name: e2e-tenants | inside the tenant clusters
+  ansible.builtin.include_tasks:
+    file: inside.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: "{{ ['t1', 't2'] | select('in', _e2e_tk) | list }}"
+  loop_control:
+    loop_var: key
+  vars:
+    _level: basic
+
+- name: e2e-tenants | overlap and isolation
+  ansible.builtin.include_tasks:
+    file: overlap.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _k1: t1
+    _k2: t2

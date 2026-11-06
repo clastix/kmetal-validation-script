@@ -1,0 +1,31 @@
+---
+# Sets kmv_tags (spec.clusterClass.values.osArtifact.tags) and kmv_artifacts:
+#   {tag: {name, phase, golden}}  - the OSArtifact in kmetal-image-builder built for each
+# tag, its phase and the phase of its <name>-golden PVC. No verdicts.
+
+- name: resolve images | OSArtifacts and golden PVCs
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get osartifacts -n {{ kmv_ns_images }} -o json
+    - kubectl get pvc -n {{ kmv_ns_images }} -o json
+  register: _img_read
+  changed_when: false
+  failed_when: false
+
+- name: resolve images | match tags to OSArtifacts
+  ansible.builtin.set_fact:
+    kmv_tags: "{{ kmv_km.spec.clusterClass['values'].osArtifact.tags | default([], true) }}"
+    kmv_artifacts: >-
+      {%- set arts = (_img_read.results[0].stdout | from_json)['items'] if _img_read.results[0].rc == 0 else [] -%}
+      {%- set pvcs = (_img_read.results[1].stdout | from_json)['items'] if _img_read.results[1].rc == 0 else [] -%}
+      {%- set out = {} -%}
+      {%- for tag in kmv_km.spec.clusterClass['values'].osArtifact.tags | default([], true) -%}
+      {%-   set name = arts | map(attribute='metadata.name') | list | kmv_artifact_for(tag) -%}
+      {%-   if name -%}
+      {%-     set art = arts | selectattr('metadata.name', 'eq', name) | first -%}
+      {%-     set golden = pvcs | selectattr('metadata.name', 'eq', name ~ '-golden') | first | default({}) -%}
+      {%-     set _ = out.update({tag: {'name': name, 'phase': art.status.phase | default('Unknown'),
+                                      'golden': golden.status.phase | default('Missing')}}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}

@@ -1,0 +1,57 @@
+---
+# Tests of the IP arithmetic and parsing filters (filter_plugins/kmv.py). Contacts nothing.
+#
+#   ansible-playbook selftest.yml
+
+- name: selftest
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: IPv4 filters
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - "'10.206.241.10' | kmv_valid_ip"
+          - "not ('10.206.241.256' | kmv_valid_ip)"
+          - "'10.206.240.0/27' | kmv_valid_cidr"
+          - "not ('10.206.240.0/33' | kmv_valid_cidr)"
+          - "'10.206.240.64/27' | kmv_cidr_canonical"
+          - "not ('10.206.240.65/27' | kmv_cidr_canonical)"
+          - "'10.206.241.0/25' | kmv_contains('10.206.241.126')"
+          - "not ('10.206.241.0/25' | kmv_contains('10.206.241.128'))"
+          - "not ('10.206.240.0/27' | kmv_overlaps('10.206.240.32/27'))"
+          - "'10.16.0.0/16' | kmv_overlaps('10.16.255.0/24')"
+          - "not ('10.16.0.0/16' | kmv_overlaps('10.36.0.0/16'))"
+          - "'10.206.240.2-10.206.240.9' | kmv_within('10.206.240.0/27')"
+          - "not ('10.206.240.15-10.206.240.40' | kmv_within('10.206.240.0/27'))"
+          - "'10.206.240.2..10.206.240.9' | kmv_within('10.206.240.0/27')"
+          - "'10.206.241.100-10.206.241.120' | kmv_contains('10.206.241.100')"
+          - "not ('10.206.241.100-10.206.241.120' | kmv_contains('10.206.241.121'))"
+          - "'10.0.0.0/30' | kmv_same_range('10.0.0.0-10.0.0.3')"
+          - "('10.250.0.0/24' | kmv_host(1)) == '10.250.0.1'"
+          - "('172.22.104.11/24' | kmv_ip) == '172.22.104.11'"
+          - "('172.22.104.11' | kmv_prefix('172.22.104.0/24')) == '24'"
+        success_msg: IPv4 filters OK
+
+    - name: Parsing filters
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - "('30m' | kmv_seconds) == 1800 and ('1h' | kmv_seconds) == 3600 and ('90s' | kmv_seconds) == 90"
+          - "('v1.0.1' | kmv_version_status('1.0.1')) == 'match'"
+          - "('1.0.1-rc10+ca66fee' | kmv_version_status('1.0.1')) == 'prerelease'"
+          - "('1.0.0' | kmv_version_status('1.0.1')) == 'other'"
+          - "('1.0.10' | kmv_version_status('1.0.1')) == 'other'"
+          - "(['ubuntu-v1364-a', 'ubuntu-v1351'] | kmv_artifact_for('v1.36.4')) == 'ubuntu-v1364-a'"
+          - "(['ubuntu-v1-35-1'] | kmv_artifact_for('v1.35.1')) == 'ubuntu-v1-35-1'"
+          - "(['ubuntu-v13641'] | kmv_artifact_for('v1.36.4')) == ''"
+          - "('NAME   V4         BOUND\nx      10.0.0.5   true\n' | kmv_table_col('V4')) == '10.0.0.5'"
+          - "('NAME   V4   BOUND\nx           true\n' | kmv_table_col('V4')) == ''"
+          - "('3 packets transmitted, 2 received, 33.3333% packet loss' | kmv_ping_loss) == '33.3333'"
+          - "('' | kmv_ping_loss) == '100'"
+          - "('  ethernets:\n    bond0.104:\n' | kmv_netplan_has('bond0.104'))"
+          - "([{'ifname': 'bond0.104', 'link': 'bond0'}, {'ifname': 'bond0', 'link': None}] | kmv_link_parent('bond0.104')) == 'bond0'"
+          - "{'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}} | kmv_ready"
+          - "{'status': {'phase': 'Running', 'containerStatuses': [{'ready': true}]}} | kmv_pod_ok"
+        success_msg: Parsing filters OK

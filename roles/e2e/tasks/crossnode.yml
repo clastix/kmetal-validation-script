@@ -1,0 +1,100 @@
+---
+# Environment a: its worker VMs run on different hosts, and a pod on one worker reaches a
+# pod on the other (Kube-OVN overlay between hosts). Uses _tk from inside.yml.
+
+- name: crossnode | hosts of the worker VMs
+  ansible.builtin.command: kubectl get vmi -n {{ _e2e_envs[key].ns }} -o json
+  register: _xn_vmi
+  changed_when: false
+  failed_when: false
+
+- name: crossnode | VM placement verdict
+  kmv_record:
+    group: e2e
+    verdicts: >-
+      {%- set hosts = ((_xn_vmi.stdout | from_json)['items'] if _xn_vmi.rc == 0 else []) | map(attribute='status.nodeName') | unique | list -%}
+      {{ [{'level': 'PASS', 'msg': _e2e_envs[key].cluster ~ ': worker VMs on hosts ' ~ hosts | join(' ')} if hosts | length >= 2
+          else {'level': 'WARN', 'msg': _e2e_envs[key].cluster ~ ': all worker VMs on ' ~ (hosts | join(' ') or '?') ~ '; cross-host overlay traffic not exercised'}] }}
+
+- name: crossnode | two pods on different workers
+  when: _e2e_envs[key].workers | int >= 2
+  block:
+    - name: crossnode | Deployment xnode with anti-affinity
+      ansible.builtin.command:
+        argv: "{{ _tk + ['apply', '-f', '-'] }}"
+        stdin: >-
+          {{ {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'xnode', 'namespace': 'kmetal-validate'},
+              'spec': {'replicas': 2, 'selector': {'matchLabels': {'app': 'xnode'}},
+                       'template': {'metadata': {'labels': {'app': 'xnode'}},
+                                    'spec': {'affinity': {'podAntiAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': [
+                                               {'labelSelector': {'matchLabels': {'app': 'xnode'}}, 'topologyKey': 'kubernetes.io/hostname'}]}},
+                                             'containers': [{'name': 'web', 'image': kmv_test_image, 'ports': [{'containerPort': 80}]}]}}}} | to_json }}
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+
+    - name: crossnode | wait for both pods
+      ansible.builtin.command:
+        argv: "{{ _tk + ['get', 'pods', '-n', 'kmetal-validate', '-l', 'app=xnode', '-o', 'json'] }}"
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      register: _xn_pods
+      until: >-
+        _xn_pods.rc == 0 and ((_xn_pods.stdout | from_json)['items'] | select('kmv_pod_ok')
+        | selectattr('status.podIP', 'defined') | list | length) >= 2
+      retries: 60
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: crossnode | pick the two ends
+      ansible.builtin.set_fact:
+        _xn: >-
+          {%- set pods = ((_xn_pods.stdout | from_json)['items'] if _xn_pods.rc == 0 else []) | select('kmv_pod_ok')
+                         | selectattr('status.podIP', 'defined') | list -%}
+          {%- if pods | length >= 2 and pods[0].spec.nodeName != pods[1].spec.nodeName -%}
+          {{ {'ok': true, 'node': pods[0].spec.nodeName, 'ip': pods[1].status.podIP} }}
+          {%- else -%}
+          {{ {'ok': false} }}
+          {%- endif -%}
+
+    - name: crossnode | probe pod on {{ _xn.node | default('?') }}
+      ansible.builtin.command:
+        argv: "{{ _tk + ['apply', '-f', '-'] }}"
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'xprobe', 'namespace': 'kmetal-validate'},
+              'spec': {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 1, 'nodeName': _xn.node,
+                       'containers': [{'name': 'c', 'image': kmv_curl_image,
+                                       'command': ['sh', '-c', 'curl -sS -o /dev/null -m 5 http://' ~ _xn.ip ~ '/']}]}} | to_json }}
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+      when: _xn.ok
+
+    - name: crossnode | wait for xprobe
+      ansible.builtin.command:
+        argv: "{{ _tk + ['get', 'pod', 'xprobe', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      register: _xn_probe
+      until: _xn_probe.stdout in ['Succeeded', 'Failed']
+      retries: 36
+      delay: 5
+      changed_when: false
+      failed_when: false
+      when: _xn.ok
+
+    - name: crossnode | verdict
+      kmv_record:
+        group: e2e
+        verdicts: >-
+          {%- set name = _e2e_envs[key].cluster -%}
+          {%- if not _xn.ok -%}
+          {{ [{'level': 'FAIL', 'msg': name ~ ': cross-node test pods not ready'}] }}
+          {%- elif _xn_probe.stdout | default('') == 'Succeeded' -%}
+          {{ [{'level': 'PASS', 'msg': name ~ ': pod on ' ~ _xn.node ~ ' reaches pod ' ~ _xn.ip ~ ' on the other worker'}] }}
+          {%- else -%}
+          {{ [{'level': 'FAIL', 'msg': name ~ ': pod on ' ~ _xn.node ~ ' cannot reach pod ' ~ _xn.ip ~ ' on the other worker'}] }}
+          {%- endif -%}

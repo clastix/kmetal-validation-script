@@ -1,0 +1,49 @@
+---
+# Scenario e2e, setup: tenant kv-<id>, environments kv-<id>-a and kv-<id>-b, each with a
+# VpcClaim and a SubnetClaim on the same CIDR, then one Cluster per environment.
+
+- name: e2e | environments a and b
+  ansible.builtin.set_fact:
+    _e2e_envs: >-
+      {{ _e2e_envs | combine({
+           'a': {'tenant': 'kv-' ~ kmv_rid, 'ns': 'kv-' ~ kmv_rid ~ '-a', 'cluster': 'kv-' ~ kmv_rid ~ '-a', 'workers': kmv_e2e_workers_a | int, 'group': 'e2e'},
+           'b': {'tenant': 'kv-' ~ kmv_rid, 'ns': 'kv-' ~ kmv_rid ~ '-b', 'cluster': 'kv-' ~ kmv_rid ~ '-b', 'workers': kmv_e2e_workers_b | int, 'group': 'e2e'}}) }}
+
+- name: e2e | tenant
+  ansible.builtin.include_tasks:
+    file: tenant.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _t: "kv-{{ kmv_rid }}"
+    _grp: e2e
+
+- name: e2e | environments
+  ansible.builtin.include_tasks:
+    file: env.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [a, b]
+  loop_control:
+    loop_var: key
+  when: _e2e_tenant_ok['kv-' ~ kmv_rid] | default(false)
+
+- name: e2e | overlapping subnets
+  ansible.builtin.include_tasks:
+    file: subnets.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _k1: a
+    _k2: b
+  when: _e2e_ok.a | default(false) and _e2e_ok.b | default(false)
+
+- name: e2e | clusters
+  ansible.builtin.include_tasks:
+    file: cluster_apply.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [a, b]
+  loop_control:
+    loop_var: key
+  when: _e2e_ok.a | default(false) and _e2e_ok.b | default(false)

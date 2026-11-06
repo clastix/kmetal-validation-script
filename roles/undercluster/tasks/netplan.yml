@@ -1,0 +1,44 @@
+---
+# netplan: every declared interface is a key in `netplan get`, so it survives a reboot.
+# A provider interface missing from netplan is INFO: kMetal may already manage it.
+
+- name: netplan | verdicts
+  kmv_record:
+    group: netplan
+    verdicts: >-
+      {%- set n = inventory_hostname -%}
+      {%- set km = hostvars['localhost'].kmv_km | default({}) -%}
+      {%- set km_pns = km.spec.networking.providerNetworks | default([], true) -%}
+      {%- set km_ifaces = km_pns | map(attribute='interface') | list -%}
+      {%- set v = [] -%}
+      {%- if kmv_n.misc.netplan | default('0') != '1' -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': n ~ ': netplan not installed, persistence not checked'}) -%}
+      {%- else -%}
+      {%-   set missing = [] -%}
+      {%-   for net, cfg in kmv_networks.items() if net in kmv_addresses and not (kmv_n.netplan | kmv_netplan_has(cfg.interface)) -%}
+      {%-     set _ = missing.append(cfg.interface) -%}
+      {%-   endfor -%}
+      {%-   set prov_missing = [] -%}
+      {%-   if kmv_role == 'worker' -%}
+      {%-     for net, cfg in (kmv_provider_networks | default({}, true)).items() if not (kmv_n.netplan | kmv_netplan_has(cfg.interface)) -%}
+      {%-       set _ = prov_missing.append(cfg.interface) -%}
+      {%-     endfor -%}
+      {%-   endif -%}
+      {%-   if missing -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': n ~ ': node networks not declared in netplan, lost at reboot: ' ~ missing | join(' ')}) -%}
+      {%-   endif -%}
+      {%-   set managed = prov_missing | select('in', km_ifaces) | list -%}
+      {%-   set other = prov_missing | reject('in', km_ifaces) | list -%}
+      {%-   if managed -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ': provider interfaces ' ~ managed | join(' ')
+                                ~ ' not in netplan: provider networks of the KMetal resource, created and managed by the platform'}) -%}
+      {%-   endif -%}
+      {%-   if other -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ': provider interfaces ' ~ other | join(' ')
+                                ~ ' not in netplan: expected when kMetal is already installed and manages its provider networks; otherwise declare them in netplan'}) -%}
+      {%-   endif -%}
+      {%-   if not missing and not prov_missing -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': every interface is declared in netplan'}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

@@ -1,0 +1,296 @@
+---
+# Help text of every check group, shown by help.yml. The first line of each text is
+# "group - summary"; help.yml lists the groups with that summary.
+
+kmv_help_groups:
+  undercluster: [connectivity, topology, addressing, hardware, os, interfaces, netplan, mesh, internet, encap]
+  kmetal: [platform, operator, metallb, storage, nodes, providers, tenancy, capi, kubevirt, crds, e2e, e2e-tenants]
+
+kmv_help_commands:
+  undercluster: "undercluster.yml - compare the nodes with the inventory over SSH (sudo)"
+  kmetal: "kmetal.yml - platform checks and end-to-end tests against the under cluster API"
+
+kmv_help:
+  undercluster:connectivity: |
+    connectivity - SSH and root access to every node (always runs)
+
+      Connects to every node in parallel on its mgmt address as ansible_user and
+      gathers facts through sudo -n (become): CPU, memory, disks, sysctls, modules,
+      links, addresses and netplan. A node that fails here gets a FAIL and is dropped
+      from every later group.
+
+      FAIL  SSH or passwordless sudo does not work on a node
+      INFO  the hostname differs from the inventory name
+      Needs inventory nodes
+
+  undercluster:topology: |
+    topology - cluster size, node registration, MetalLB exclusion label
+
+      Counts the control_plane and workers hosts of the inventory. With a working
+      kubeconfig, compares them with `kubectl get nodes` (names and InternalIP = mgmt
+      address), and checks that no control plane carries
+      node.kubernetes.io/exclude-from-external-load-balancers, which stops the MetalLB
+      speakers from announcing there (kMetal 1.0.1 removes it).
+
+      FAIL  fewer than 1 control plane or 2 workers; exclusion label on a control plane
+      WARN  fewer than 3 or an even number of control planes; node list mismatch
+      Needs inventory; kubeconfig optional
+
+  undercluster:addressing: |
+    addressing - non-overlapping address plan
+
+      Compares every kmv_networks CIDR pair. With a reachable KMetal resource, also
+      compares them with kubeOVN.podCIDR, serviceCIDR, 100.64.0.0/16 (Kube-OVN join) and
+      every provider subnet, and checks that the MetalLB ranges lie inside their network
+      (tenantControlPlanes in tenant, management in mgmt) and contain no node address.
+
+      FAIL  any overlap; a MetalLB range outside its network or covering a node IP
+      Needs inventory; kubeconfig optional
+
+  undercluster:hardware: |
+    hardware - lab minimum per node
+
+      From the gathered facts: CPUs, memory, root filesystem size, and the link speed of
+      the physical parent of the mgmt interface (following VLAN links).
+
+      WARN  below 8 CPU, 16 GiB RAM, 100 GB root, 1 Gb/s
+      INFO  below the production profile (16 CPU, 64 GB, 500 GB, 10 Gb/s); unknown speed
+      Needs inventory, SSH
+
+  undercluster:os: |
+    os - Kubernetes and KubeVirt host prerequisites
+
+      From the gathered facts: swap, sysctls, kernel modules, tools and time sync.
+      Workers must be able to run VMs.
+
+      FAIL  swap on; net.ipv4.ip_forward != 1; ping missing;
+            on workers: /dev/kvm missing or kvm_intel/kvm_amd not loaded
+      WARN  fs.inotify.max_user_instances < 8192; br_netfilter not loaded;
+            conntrack, socat or curl missing; clock not NTP-synchronised
+      Needs inventory, SSH
+
+  undercluster:interfaces: |
+    interfaces - VLAN interfaces, MTU and addresses as declared
+
+      Reads `ip -d -j link` and `ip -j addr` on every node. For each network of
+      kmv_networks: the interface exists, is UP with carrier, is a VLAN device with the
+      declared vlan, has the declared mtu, and carries the node's kmv_addresses entry.
+      Provider interfaces (kmv_provider_networks) must exist on workers with their VLAN
+      and NO IPv4 address.
+
+      FAIL  missing or down interface, wrong VLAN, MTU or address; IPv4 on a provider
+      INFO  control plane without overlay (expected: the tunnel runs on network nodes);
+            extra addresses; provider interface on a control plane; provider interface
+            absent while autoCreateVLANSubinterface is set
+      Needs inventory, SSH
+
+  undercluster:netplan: |
+    netplan - interface persistence across reboots
+
+      Looks for every declared interface as a key in `netplan get` on each node.
+
+      WARN  a node-network interface (mgmt, tenant, overlay, ...) is not in netplan
+      INFO  a provider interface is not in netplan: kMetal may already manage it
+            (named as such when the KMetal resource lists it); netplan not installed
+      Needs inventory, SSH; kubeconfig optional
+
+  undercluster:mesh: |
+    mesh - full-mesh reachability on every node network
+
+      Each node pings every peer address on each network both have, bound to that
+      network's interface, all nodes in parallel:
+        ping -c3 -i0.2 -W1 -q -I <iface> <peer>
+      When mtu > 1500, a do-not-fragment ping of MTU-28 bytes checks jumbo frames.
+
+      FAIL  peer unreachable (100% loss)
+      WARN  partial loss; jumbo frame does not pass end to end
+      Needs inventory, SSH
+
+  undercluster:internet: |
+    internet - egress only through the management network
+
+      On every node and network: curl kmv_internet_probe_url and ping
+      kmv_internet_probe_ip bound to the network's interface, so a probe only succeeds if
+      that network has its own way out; plus a DNS lookup of kmv_dns_probe.
+
+      FAIL  DNS fails; kmv_internet_network (mgmt) cannot fetch the URL
+      WARN  any other network reaches the internet
+      INFO  no ICMP reply on kmv_internet_network (often filtered)
+      Needs inventory, SSH
+
+  undercluster:encap: |
+    encap - kernel encapsulation for the Kube-OVN overlay
+
+      Checks that geneve, vxlan and openvswitch are loaded or loadable, then builds a
+      real tunnel (kubeOVN.tunnelType, default Geneve) between the first two nodes with
+      an overlay address, on UDP kmv_encap_test_port (6090, away from Kube-OVN's 6081):
+        ip link add kvtest0 type geneve id 4242 remote <peer> dstport 6090
+      pings across 169.254.250.0/30, then deletes the device.
+
+      FAIL  tunnel-type or openvswitch module missing on an overlay node; no traffic
+      WARN  the other encapsulation module missing
+      Needs inventory, SSH; creates kvtest0 for a few seconds
+
+  kmetal:platform: |
+    platform - KMetal resource and its components
+
+      Reads the KMetal resource (kubectl get km): READY and VERSION columns, then every
+      .status.components[] entry; non-Ready components are listed with their message.
+
+      FAIL  no KMetal resource; READY != True; a component not Ready
+      WARN  no components reported
+      Needs kubeconfig
+
+  kmetal:operator: |
+    operator - kmetal-operator release, version and Flux delivery
+
+      Finds the operator as the Helm release kmetal-operator in kmetal-operator-system,
+      or else as a Flux HelmRelease in kmetal-flux (GitOps install). Checks its chart
+      version against kMetal 1.0.1, its pods, every HelmRelease, Kustomization and
+      OCIRepository in kmetal-flux, and pods anywhere in the cluster.
+
+      PASS  Helm release deployed, or Flux HelmRelease present; chart 1.0.1 or a 1.0.1
+            pre-release (with an INFO)
+      FAIL  operator not found; operator pods not ready; a Flux object not Ready
+      WARN  chart version not 1.0.1; pods outside Running/Completed elsewhere
+      Needs kubeconfig
+
+  kmetal:metallb: |
+    metallb - address pools, advertisement, speakers and a live allocation
+
+      Each loadBalancer.tenantControlPlanes / management range must equal an
+      IPAddressPool entry in kmetal-metallb (kMetal 1.0.1 names the pools tenant-cp-pool
+      and mgmt-pool), advertised by an L2Advertisement. Every spec.placement node
+      (control planes by default) should run a Ready speaker. Smoke test: a LoadBalancer
+      Service pinned to each pool must get an address in range and answer HTTP (from
+      this machine, else from a control plane over SSH).
+
+      FAIL  range not in a pool; tenant-cp-pool missing; pool not advertised; no
+            tenantControlPlanes range; no address or out of range
+      WARN  management range empty or mgmt-pool missing; no speaker on a placement node;
+            address does not answer HTTP
+      Needs kubeconfig; inventory optional; creates a temporary namespace
+
+  kmetal:storage: |
+    storage - storage classes, snapshots and live volumes
+
+      underclusterClassName and tenantClassName must exist and differ, etcdClassName
+      exists if set. The VolumeSnapshotClass must use the platform class's driver and
+      the CDI StorageProfile must name it. Smoke tests: per class, a 1 Gi PVC and a
+      write/read pod placed where the real consumer runs (compute nodes; spec.placement
+      for etcd); then snapshot the platform volume, restore it and WRITE to the copy.
+
+      FAIL  class missing; no snapshot class; empty StorageProfile snapshotClass;
+            PVC/pod or snapshot fails; restore not writable with cloneStrategy=snapshot
+      WARN  same class names; no volume expansion; restore not writable otherwise
+      Needs kubeconfig; creates a temporary namespace
+
+  kmetal:nodes: |
+    nodes - node labels and Kube-OVN central nodes (kMetal 1.0.1)
+
+      Control planes: no node.kubernetes.io/exclude-from-external-load-balancers (the
+      operator removes it). Compute: node-role.kubernetes.io/compute, with a Ready
+      virt-handler. Network nodes: node-role.kubernetes.io/network with an EMPTY value
+      (never control planes), ovn.kubernetes.io/external-gw=true (set by the operator),
+      a Ready kube-ovn-cni, and the tunnelInterface (over SSH with an inventory).
+      centralNodes: each labelled kube-ovn/role=master by the operator; ideally the
+      three control planes. kmetal.io/ovn is no longer read.
+
+      FAIL  exclusion label on a control plane; no compute or network node; network
+            label with a value; missing external-gw, kube-ovn-cni, tunnel interface or
+            kube-ovn/role=master
+      WARN  network label on a control plane; kmetal.io/ovn without the network label;
+            a worker in centralNodes; fewer than three control planes used while
+            available; fewer than 3 or an even number of central nodes;
+            kube-ovn/role=master outside centralNodes
+      INFO  kmetal.io/ovn left on a network node (can be removed)
+      Needs kubeconfig; inventory optional
+
+  kmetal:providers: |
+    providers - every provider network of the KMetal resource
+
+      Compares spec.networking.providerNetworks with the inventory's
+      kmv_provider_networks by interface: shared ones are the defaults, the others are
+      additional networks managed by the platform. For each: defaultProviderSubnet
+      exists, a subnet named external exists, subnets are canonical with the gateway
+      inside, no overlap with pod, service, join, node or other provider networks; over
+      SSH, the interface exists on every network node not in excludeNodes, has carrier
+      and no IPv4.
+
+      FAIL  bad subnet or overlap; no subnet named external; interface missing or
+            carrying IPv4; VLAN differs from the inventory; no network node left after
+            excludeNodes
+      WARN  unknown excludeNodes entry; double VLAN tagging; inventory provider not in
+            the KMetal resource
+      Needs kubeconfig; inventory for the SSH part
+
+  kmetal:tenancy: |
+    tenancy - Capsule enforcement for multiTenancy.users
+
+      spec.multiTenancy.users must be set and a CapsuleConfiguration must exist. Probe:
+      create a namespace while impersonating a member of the first subject who owns no
+      Tenant; Capsule must reject it.
+
+      PASS  the namespace is rejected
+      FAIL  no CapsuleConfiguration; namespace created without a tenant label
+      WARN  multiTenancy.users empty (tenancy inactive)
+      Needs kubeconfig (impersonation)
+
+  kmetal:capi: |
+    capi - Cluster API providers and ClusterClasses
+
+      In kmetal-capi-providers: one core (cluster-api), bootstrap (kubeadm),
+      infrastructure (kubevirt) and control-plane (kamaji) provider, each Ready, and at
+      least one ClusterClass; shows the one the end-to-end tests will use.
+
+      FAIL  provider missing or not Ready; no ClusterClass; kmv_e2e_clusterclass missing
+      Needs kubeconfig
+
+  kmetal:kubevirt: |
+    kubevirt - virtualisation stack
+
+      KubeVirt in system-kubevirt and CDI must report phase Deployed.
+
+      FAIL  KubeVirt not Deployed
+      WARN  CDI not Deployed
+      Needs kubeconfig
+
+  kmetal:crds: |
+    crds - tenant-facing APIs and golden OS images
+
+      The CRDs tenants rely on (clusters, kamajicontrolplanes, virtualmachines, the
+      network.kmetal.io claims and providernetworks, Capsule tenants, volumesnapshots,
+      osartifacts) exist. For every spec.clusterClass.values.osArtifact.tags entry, an
+      OSArtifact in kmetal-image-builder is Ready and its <name>-golden PVC is Bound.
+
+      FAIL  CRD missing; no tags; a tag without a usable golden image
+      Needs kubeconfig
+
+  kmetal:e2e: |
+    e2e - one tenant, two environments on the same CIDR
+
+      Creates tenant kv-<id> and, as its owner, environments kv-<id>-a / -b, each with a
+      VpcClaim (external access) and a SubnetClaim on kmv_e2e_subnet_cidr, and a tenant
+      cluster in each (2 and 1 workers) from the osArtifact image. Then: nodes Ready, a
+      PVC backed by tenantClassName, internet egress, cross-node pod traffic, an EIP
+      bound to a LoadBalancer Service, and VPC isolation probed both ways.
+      Cleaned up at the end; skipped after earlier failures unless kmv_force_e2e=true.
+
+      FAIL  any step above fails, or one environment reaches the other's workers
+      WARN  workers on one host; EIP not reachable from kmv_eip_probe_from
+      Needs kubeconfig; ~3 VMs, 2 tenant-pool + 3 provider addresses; 20-40 min
+
+  kmetal:e2e-tenants: |
+    e2e-tenants - multi-tenancy segregation between two tenants
+
+      Creates tenants kv-<id>-t1 / -t2, each with one environment, a VpcClaim and a
+      SubnetClaim on the SAME kmv_e2e_subnet_cidr, and a tenant cluster (1 and 2
+      workers). Probes, as each owner, ten actions on the other tenant (pods, secrets,
+      its kubeconfig, clusters, claims, namespace, Tenant) with `kubectl auth can-i`.
+      Then: nodes Ready, egress per tenant, and traffic isolation probed both ways.
+      Its clusters are awaited together with e2e's; cleaned up at the end.
+
+      FAIL  an owner is allowed any action on the other tenant; one tenant reaches the
+            other's workers; setup, cluster or egress failure
+      WARN  an owner cannot even read its own environment
+      Needs kubeconfig; ~3 VMs, 2 tenant-pool + 2 provider addresses

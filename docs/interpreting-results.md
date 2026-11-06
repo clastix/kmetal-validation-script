@@ -10,15 +10,15 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 
 | Message (abridged) | Likely cause | Fix |
 |---|---|---|
-| `cannot run 'sudo -n bash' over SSH` | Key not authorised, wrong `SSH_USER`, sudo asks for a password, or the host key changed | Test `ssh <user>@<mgmt ip> sudo -n true`; adjust `SSH_OPTS` (jump host, key) or the sudoers rule |
-| `<net> interface <if> not found` | `NET_IFACE` misspelt, or the VLAN not configured on that node | Compare with `ip -br link`; fix netplan or `setup.env` |
-| `expected VLAN <id>, found …` | Wrong VLAN on the sub-interface, or the interface is not a VLAN device | Correct the netplan `vlans:` entry, or leave `NET_VLAN` empty for a non-VLAN interface |
-| `expected <ip>/<len>, has: …` | Address or prefix differs from the plan | Fix the address, or the `NODES` / `NET_CIDR` entry |
+| `cannot run sudo -n over SSH as <user>` | Key not authorised, wrong `ansible_user`, sudo asks for a password, or the host key changed | Test `ssh <user>@<mgmt ip> sudo -n true`; adjust `ansible_user`, `ansible_ssh_common_args` (jump host) or the sudoers rule. `-vvv` shows the SSH session |
+| `<net> interface <if> not found` | `interface` misspelt in the inventory, or the VLAN not configured on that node | Compare with `ip -br link`; fix netplan or the inventory |
+| `expected VLAN <id>, found …` | Wrong VLAN on the sub-interface, or the interface is not a VLAN device | Correct the netplan `vlans:` entry, or omit `vlan` for a non-VLAN interface |
+| `expected <ip>/<len>, has: …` | Address or prefix differs from the plan | Fix the address, or the node's `kmv_addresses` / the network's `cidr` |
 | `provider … carries IPv4` | An address left on the provider interface | Remove it from netplan; Kube-OVN takes the interface whole |
 | `node networks not declared in netplan` | Interface created by hand; lost at reboot | Declare it in netplan |
 | `provider interfaces … not in netplan` (INFO) | kMetal manages the provider network | Nothing to do, unless kMetal is not installed |
 | `-> <peer> on <net>: unreachable` | Switch port not trunking the VLAN, wrong address, or a firewall | Check the switch configuration for that VLAN on both ports |
-| `MTU … does not pass end to end` | Switch or peer below the declared MTU | Raise the MTU along the path, or lower `NET_MTU` and the interface MTU |
+| `MTU … does not pass end to end` | Switch or peer below the declared MTU | Raise the MTU along the path, or lower `mtu` and the interface MTU |
 | `<net> reaches the internet; only mgmt should` | A default route or policy route on a non-management network | Remove the route; tenant egress must leave through OVN only |
 | `kernel modules not available: geneve …` | Minimal kernel without the module package | Install the distribution's extra modules package (e.g. `linux-modules-extra-$(uname -r)`) |
 | `… tunnel … no traffic` | UDP between overlay addresses filtered, or overlay routing broken | Allow UDP 6081 (and the test port) between overlay addresses |
@@ -30,11 +30,12 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 
 | Message (abridged) | Likely cause | Fix |
 |---|---|---|
-| `… exclude-from-external-load-balancers is set …` | kubeadm labels control planes this way by default; MetalLB speakers then do not announce from them | `kubectl label node <n> node.kubernetes.io/exclude-from-external-load-balancers-` |
-| `no Ready MetalLB speaker on this control plane` (WARN) | Speaker DaemonSet not scheduled there (label, taint or node selector) | `kubectl get ds -n kmetal-metallb`; check tolerations and the exclusion label |
+| `… exclude-from-external-load-balancers is set …` | kubeadm labels control planes this way; the kMetal 1.0.1 operator removes it, so the node labelling controller is not working | Check the operator logs; meanwhile `kubectl label node <n> node.kubernetes.io/exclude-from-external-load-balancers-` |
+| `no Ready MetalLB speaker on this spec.placement node` (WARN) | Speaker DaemonSet not scheduled there (label, taint or node selector) | `kubectl get ds -n kmetal-metallb`; check `spec.placement`, tolerations and the exclusion label |
+| `no IPAddressPool tenant-cp-pool` | The operator did not create the pool from `loadBalancer.tenantControlPlanes` | Check the KMetal components and the operator logs; tenant control planes get no address until it exists |
 | `component X is Pending/Failed: …` | The first non-Ready component blocks the ones after it | Read the message; check the Flux object of that component in `kmetal-flux` |
-| `operator not found` | Installed under another release or namespace | Set `KMETAL_RELEASE` / `KMETAL_NAMESPACE` in `setup.env` |
-| `operator chart is X; this script validates 1.0.x` (WARN) | Different kMetal version | Results may not match that version's rules; interpret them with care |
+| `operator not found` | Installed under another release or namespace | Set `kmv_operator_release` / `kmv_operator_namespace` |
+| `operator chart is X; these playbooks validate kMetal 1.0.1` (WARN) | Different kMetal version | Results may not match that version's rules; interpret them with care |
 | `loadBalancer.<role> … is not in any IPAddressPool` | Spec and MetalLB pools drifted | Let the operator reconcile, or fix the spec |
 | `Service from pool … got no EXTERNAL-IP` | Pool exhausted, or the MetalLB controller is unhealthy | `kubectl get ipaddresspool -n kmetal-metallb -o yaml`; free addresses |
 | `no VolumeSnapshotClass for driver …` | CSI driver without snapshot support, or the class is missing | Install the snapshot class for the platform storage driver |
@@ -42,9 +43,13 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 | `volume restored from a … snapshot is not usable` | The driver restores snapshots read-only | FAIL when the StorageProfile clones by snapshot: use another backend for the platform class, or a `copy` clone strategy |
 | `<class>: PVC/pod smoke test did not complete` | Provisioning failure, or the pod cannot be scheduled (e.g. a node-local class on nodes without its path) | Read the PVC events printed under the message |
 | `no node labelled node-role.kubernetes.io/compute` | Labels not applied; the platform still reports healthy | `kubectl label node <n> node-role.kubernetes.io/compute=` |
-| `ovn.kubernetes.io/external-gw=true missing` | Operator 1.0.0 does not set it | `kubectl label node <n> ovn.kubernetes.io/external-gw=true` |
-| `kube-ovn/role=master missing on a central node` | Operator 1.0.0 does not set it | `kubectl label node <n> kube-ovn/role=master` |
-| `control plane labelled kmetal.io/ovn` (WARN) | Kube-OVN per-node components scheduled on a control plane without overlay | `kubectl label node <n> kmetal.io/ovn-` |
+| `no node labelled node-role.kubernetes.io/network=` | Network nodes not labelled; on an upgrade from 1.0.0, the `kmetal.io/ovn` label was not replaced | `kubectl label node <n> node-role.kubernetes.io/network=` on every node carrying the overlay |
+| `node-role.kubernetes.io/network=true; the value must be empty` | Labelled with a value; Kube-OVN's DaemonSets match only the empty value | `kubectl label node <n> --overwrite node-role.kubernetes.io/network=` |
+| `labelled kmetal.io/ovn but not node-role.kubernetes.io/network` (WARN) | Missed relabel at the upgrade to 1.0.1 | Add the network label; then remove `kmetal.io/ovn` |
+| `ovn.kubernetes.io/external-gw=true missing` | The operator's node labelling controller did not apply it | Check the operator logs and that the node carries the network label |
+| `kube-ovn/role=master missing on a central node` | The operator's node labelling controller did not apply it | Check the operator logs and the `centralNodes` names |
+| `control plane labelled node-role.kubernetes.io/network` (WARN) | Kube-OVN per-node components scheduled on a control plane without overlay | `kubectl label node <n> node-role.kubernetes.io/network-` |
+| `no provider subnet is named external` | VPC external access looks for a subnet literally named `external` | Rename or add the subnet in `providerNetworks` |
 | `worker listed in centralNodes` (WARN) | ovn-central placed on workers | Prefer the three control planes in `centralNodes` |
 | `N central node(s): fill centralNodes to three` (WARN) | Raft cannot tolerate a failure | List three nodes |
 | `provider … interface … missing` | That network node lacks the NIC/VLAN | Configure it, or add the node to `excludeNodes` |
@@ -57,9 +62,10 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 
 | Message (abridged) | Likely cause | Fix |
 |---|---|---|
-| `end-to-end tests skipped: N failures above` | An earlier group failed | Fix those first, or use `--force-e2e` |
+| `end-to-end tests skipped: N failures above` | An earlier platform group failed | Fix those first, or use `-e kmv_force_e2e=true` |
 | `the owner of <t1> is allowed on tenant <t2>: …` | A ClusterRole or RoleBinding grants tenant owners rights beyond their own tenant (e.g. a broad aggregated role, or a binding to the whole tenant group) | Find the binding with `kubectl auth can-i --list --as <owner>`; scope it to the tenant's own namespaces. Multi-tenancy is broken until fixed |
 | `the owner of <t> cannot read pods in its own environment` (WARN) | Capsule does not grant the owner's admin role in its namespaces | Check the Tenant's `owners` and Capsule's additional role bindings |
+| `FAILED - RETRYING: … (N retries left)` | Not a check result: Ansible polling (pods, claims, clusters) | Nothing; wait. A verdict follows when the poll ends |
 | `isolation <x> -> <y> not probed` (INFO) | Both clusters use the same worker addresses | Expected for one direction; keep different worker counts so the other direction is probed |
 | `e2e needs a multiTenancy Group system:serviceaccounts:<namespace>` | Tenancy uses users or another group form | Add such a group to `spec.multiTenancy.users` |
 | `owner of <t> cannot create environment` | Capsule rejected the owner, e.g. a forced namespace prefix or a namespace quota | Check the Tenant and the CapsuleConfiguration users |

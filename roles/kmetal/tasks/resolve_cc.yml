@@ -1,0 +1,22 @@
+---
+# Sets kmv_ccs (ClusterClass names in kmetal-capi-providers), kmv_cc (the one the
+# end-to-end tests use) and kmv_capi_v1beta2 (cluster.x-k8s.io/v1beta2 served). No verdicts.
+
+- name: resolve ClusterClass | API versions and ClusterClasses
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl api-versions
+    - kubectl get clusterclasses.cluster.x-k8s.io -n {{ kmv_ns_capi }} -o jsonpath={.items[*].metadata.name}
+  register: _cc_read
+  changed_when: false
+  failed_when: false
+
+- name: resolve ClusterClass | pick
+  ansible.builtin.set_fact:
+    kmv_capi_v1beta2: "{{ 'cluster.x-k8s.io/v1beta2' in _cc_read.results[0].stdout_lines | default([]) }}"
+    kmv_ccs: "{{ _cc_read.results[1].stdout | default('') | split }}"
+    kmv_cc: >-
+      {{ (kmv_e2e_clusterclass if kmv_e2e_clusterclass in (_cc_read.results[1].stdout | default('') | split) else '')
+         if kmv_e2e_clusterclass else
+         (((['kubevirt-standard', 'kubevirt-expert', 'kubevirt-kubeadm'] + (_cc_read.results[1].stdout | default('') | split))
+           | select('in', _cc_read.results[1].stdout | default('') | split) | first) | default('')) }}

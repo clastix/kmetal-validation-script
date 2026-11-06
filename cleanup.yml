@@ -1,0 +1,58 @@
+---
+# Remove what a run left behind (after Ctrl-C, or a run with -e kmv_keep=true).
+#
+#   ansible-playbook -i inventory/<site> cleanup.yml -e kmv_run_id=40213
+#
+# Deletes every object labelled kmetal-validate/run-id=<ID> and, when the inventory has
+# nodes, the kvtest0 test tunnel on every node.
+
+- name: cleanup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - common
+  vars:
+    kmv_need_kube: true
+  environment:
+    KUBECONFIG: "{{ kmv_kubeconfig | expanduser }}"
+  tasks:
+    - name: Require a run ID
+      ansible.builtin.fail:
+        msg: "cleanup.yml needs the run ID: -e kmv_run_id=<ID> (printed at the start of every run)"
+      when: kmv_run_id | string | length == 0
+
+    - name: Prepare
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: prepare
+
+    - name: Delete the resources of the run
+      ansible.builtin.import_role:
+        name: cleanup
+      vars:
+        _cl_rid: "{{ kmv_run_id }}"
+
+- name: cleanup | test tunnels on the nodes
+  hosts: kmetal_nodes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Delete kvtest0
+      ansible.builtin.command: ip link del kvtest0
+      register: _cl_tun
+      changed_when: _cl_tun.rc == 0
+      failed_when: false
+      ignore_unreachable: true
+
+- name: cleanup | summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - common
+  tasks:
+    - name: Summary
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: summary

@@ -1,0 +1,138 @@
+---
+# Environment a: EipClaim e2e (type nat), bound to a LoadBalancer Service in the tenant
+# cluster (loadBalancerClass kmetal, annotation network.kmetal.io/eip-claim: e2e). The
+# Service's EXTERNAL-IP must be the claim's address, the claim BOUND, and the address
+# should answer HTTP from kmv_eip_probe_from.
+
+- name: eip | tenant kubectl
+  ansible.builtin.set_fact:
+    _tk: "{{ ['kubectl', '--kubeconfig', _e2e_tk.a.kc] }}"
+    _eip_ns: "{{ _e2e_envs.a.ns }}"
+
+- name: eip | EipClaim e2e
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: network.kmetal.io/v1alpha1
+      kind: EipClaim
+      metadata: {name: e2e, namespace: "{{ _eip_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+      spec: {type: nat}
+  register: _eip_apply
+  ignore_errors: true
+
+- name: eip | wait for EipClaim e2e
+  ansible.builtin.include_tasks:
+    file: wait_ready.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _wr_kind: eipclaims.network.kmetal.io
+    _wr_name: e2e
+    _wr_ns: "{{ _eip_ns }}"
+    _wr_retries: 36
+  when: not (_eip_apply.failed | default(false))
+
+- name: eip | claim address
+  ansible.builtin.command: kubectl get eipclaims.network.kmetal.io e2e -n {{ _eip_ns }}
+  register: _eip_table
+  changed_when: false
+  failed_when: false
+
+- name: eip | claim verdict
+  kmv_record:
+    group: e2e
+    verdicts:
+      - "{{ {'level': 'FAIL', 'msg': 'cannot create EipClaim e2e: ' ~ _eip_apply.msg | default('') | truncate(200)} if _eip_apply.failed | default(false)
+            else {'level': 'PASS', 'msg': _eip_ns ~ ': EipClaim e2e Ready on ' ~ (_eip_table.stdout | kmv_table_col('V4') or '?')} if _wr_ok | default(false)
+            else {'level': 'FAIL', 'msg': _eip_ns ~ ': EipClaim e2e not Ready in 180s'} }}"
+
+- name: eip | Service web
+  when: not (_eip_apply.failed | default(false)) and _wr_ok | default(false)
+  block:
+    - name: eip | Deployment and LoadBalancer Service web in the tenant cluster
+      ansible.builtin.command:
+        argv: "{{ _tk + ['apply', '-f', '-'] }}"
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'List', 'items': [
+               {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': 'web', 'namespace': 'kmetal-validate'},
+                'spec': {'replicas': 1, 'selector': {'matchLabels': {'app': 'web'}},
+                         'template': {'metadata': {'labels': {'app': 'web'}},
+                                      'spec': {'containers': [{'name': 'web', 'image': kmv_test_image, 'ports': [{'containerPort': 80}]}]}}}},
+               {'apiVersion': 'v1', 'kind': 'Service',
+                'metadata': {'name': 'web', 'namespace': 'kmetal-validate', 'annotations': {'network.kmetal.io/eip-claim': 'e2e'}},
+                'spec': {'type': 'LoadBalancer', 'loadBalancerClass': 'kmetal', 'selector': {'app': 'web'},
+                         'ports': [{'port': 80, 'targetPort': 80}]}}]} | to_json }}
+      delegate_to: "{{ _e2e_tk.a.host }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+
+    - name: eip | remember the Service for cleanup
+      ansible.builtin.set_fact:
+        _e2e_eip_applied: true
+
+    - name: eip | wait for the EXTERNAL-IP
+      ansible.builtin.command:
+        argv: "{{ _tk + ['get', 'svc', 'web', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.loadBalancer.ingress[0].ip}'] }}"
+      delegate_to: "{{ _e2e_tk.a.host }}"
+      ignore_unreachable: true
+      register: _eip_ext
+      until: _eip_ext.stdout | default('') | length > 0
+      retries: 60
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: eip | BOUND column and backend rollout
+      ansible.builtin.command: "{{ item.argv }}"
+      delegate_to: "{{ item.host }}"
+      ignore_unreachable: true
+      loop:
+        - {argv: "kubectl get eipclaims.network.kmetal.io e2e -n {{ _eip_ns }}", host: localhost}
+        - {argv: "{{ (_tk + ['rollout', 'status', 'deploy/web', '-n', 'kmetal-validate', '--timeout=180s']) | join(' ') }}", host: "{{ _e2e_tk.a.host }}"}
+      loop_control:
+        label: "{{ item.argv.split(' ')[1] }}"
+      register: _eip_more
+      changed_when: false
+      failed_when: false
+      when: _eip_ext.stdout | default('') | length > 0
+
+    - name: eip | HTTP from this machine
+      ansible.builtin.uri:
+        url: "http://{{ _eip_ext.stdout }}/"
+        timeout: 5
+      register: _eip_http_local
+      failed_when: false
+      when: _eip_ext.stdout | default('') | length > 0 and kmv_eip_probe_from == 'local'
+
+    - name: eip | HTTP from {{ kmv_eip_probe_from }}
+      ansible.builtin.uri:
+        url: "http://{{ _eip_ext.stdout }}/"
+        timeout: 5
+      delegate_to: "{{ kmv_eip_probe_from if kmv_eip_probe_from != 'local' else 'localhost' }}"
+      ignore_unreachable: true
+      register: _eip_http_node
+      failed_when: false
+      when: _eip_ext.stdout | default('') | length > 0 and kmv_eip_probe_from != 'local'
+
+    - name: eip | Service verdicts
+      kmv_record:
+        group: e2e
+        verdicts: >-
+          {%- set name = _e2e_envs.a.cluster -%}
+          {%- set ext = _eip_ext.stdout | default('') -%}
+          {%- set v4 = _eip_table.stdout | kmv_table_col('V4') -%}
+          {%- if not ext -%}
+          {{ [{'level': 'FAIL', 'msg': name ~ ': LoadBalancer Service with EipClaim e2e got no EXTERNAL-IP in 300s'}] }}
+          {%- else -%}
+          {%-   set v = [] -%}
+          {%-   set _ = v.append({'level': 'PASS', 'msg': name ~ ': Service EXTERNAL-IP ' ~ ext ~ ' is the EipClaim address'} if ext == v4
+                              else {'level': 'FAIL', 'msg': name ~ ': Service EXTERNAL-IP ' ~ ext ~ ', EipClaim address ' ~ v4}) -%}
+          {%-   set bound = _eip_more.results[0].stdout | default('') | kmv_table_col('BOUND') -%}
+          {%-   set _ = v.append({'level': 'PASS', 'msg': _eip_ns ~ ': EipClaim e2e BOUND'} if bound | lower == 'true'
+                              else {'level': 'WARN', 'msg': _eip_ns ~ ': EipClaim e2e BOUND=' ~ (bound or '?')}) -%}
+          {%-   set ok = (_eip_http_local.status | default(-1)) > 0 if kmv_eip_probe_from == 'local' else (_eip_http_node.status | default(-1)) > 0 -%}
+          {%-   set _ = v.append({'level': 'PASS', 'msg': 'http://' ~ ext ~ '/ answers from ' ~ kmv_eip_probe_from} if ok
+                              else {'level': 'WARN', 'msg': 'http://' ~ ext ~ '/ does not answer from ' ~ kmv_eip_probe_from ~ ' (provider network routing is site-specific)'}) -%}
+          {{ v }}
+          {%- endif -%}

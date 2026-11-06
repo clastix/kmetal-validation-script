@@ -1,0 +1,40 @@
+---
+# The SubnetClaims of environments _k1 and _k2 are two distinct Kube-OVN subnets with the
+# same CIDR in different VPCs.
+
+- name: subnets | derived Kube-OVN subnets of {{ _k1 }} and {{ _k2 }}
+  ansible.builtin.command: kubectl get subnetclaims.network.kmetal.io primary -n {{ _e2e_envs[item].ns }}
+  loop: ["{{ _k1 }}", "{{ _k2 }}"]
+  register: _sn_claims
+  changed_when: false
+  failed_when: false
+
+- name: subnets | read the Kube-OVN subnets
+  ansible.builtin.command: kubectl get subnets.kubeovn.io {{ item.stdout | default('') | kmv_table_col('SUBNET') }} -o json
+  loop: "{{ _sn_claims.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: _sn_subnets
+  changed_when: false
+  failed_when: false
+  when: (item.stdout | default('') | kmv_table_col('SUBNET')) | length > 0
+
+- name: subnets | verdict
+  kmv_record:
+    group: "{{ _e2e_envs[_k1].group }}"
+    verdicts: >-
+      {%- set s1 = _sn_claims.results[0].stdout | default('') | kmv_table_col('SUBNET') -%}
+      {%- set s2 = _sn_claims.results[1].stdout | default('') | kmv_table_col('SUBNET') -%}
+      {%- if not s1 or not s2 -%}
+      {{ [{'level': 'INFO', 'msg': 'derived Kube-OVN subnet names not reported; overlap shown by the claims only'}] }}
+      {%- else -%}
+      {%-   set j1 = (_sn_subnets.results[0].stdout | default('{}', true)) | from_json -%}
+      {%-   set j2 = (_sn_subnets.results[1].stdout | default('{}', true)) | from_json -%}
+      {%-   set c1, v1 = j1.spec.cidrBlock | default(''), j1.spec.vpc | default('') -%}
+      {%-   set c2, v2 = j2.spec.cidrBlock | default(''), j2.spec.vpc | default('') -%}
+      {%-   if s1 != s2 and c1 and c1 == c2 and v1 != v2 -%}
+      {{ [{'level': 'PASS', 'msg': 'overlapping subnets: ' ~ s1 ~ ' (VPC ' ~ v1 ~ ') and ' ~ s2 ~ ' (VPC ' ~ v2 ~ ') both on ' ~ c1}] }}
+      {%-   else -%}
+      {{ [{'level': 'FAIL', 'msg': 'subnets ' ~ s1 ~ ' (' ~ c1 ~ ', VPC ' ~ v1 ~ ') and ' ~ s2 ~ ' (' ~ c2 ~ ', VPC ' ~ v2 ~ ') are not two isolated copies of ' ~ kmv_e2e_subnet_cidr}] }}
+      {%-   endif -%}
+      {%- endif -%}

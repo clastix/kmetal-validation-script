@@ -1,0 +1,71 @@
+---
+# Cluster _e2e_envs[key].cluster in its environment, from ClusterClass kmv_cc at version
+# _e2e_tag: controlPlane exposed as LoadBalancer, machineSize, osImage (the OSArtifact),
+# network.subnet primary, each set only when the ClusterClass declares the variable.
+
+- name: cluster {{ key }} | ClusterClass {{ kmv_cc }}
+  ansible.builtin.command: kubectl get clusterclasses.cluster.x-k8s.io {{ kmv_cc }} -n {{ kmv_ns_capi }} -o json
+  register: _ca_cc
+  changed_when: false
+  failed_when: false
+
+- name: cluster {{ key }} | variables
+  ansible.builtin.set_fact:
+    _ca_vars: >-
+      {%- set cc = (_ca_cc.stdout | from_json) if _ca_cc.rc == 0 else {} -%}
+      {%- set declared = cc.spec.variables | default([], true) | map(attribute='name') | list -%}
+      {%- set out = [] -%}
+      {%- if 'controlPlane' in declared -%}{%- set _ = out.append({'name': 'controlPlane', 'value': {'dataStoreName': kmv_e2e_datastore, 'network': {'serviceType': 'LoadBalancer'}}}) -%}{%- endif -%}
+      {%- if 'machineSize' in declared -%}{%- set _ = out.append({'name': 'machineSize', 'value': kmv_e2e_machine_size}) -%}{%- endif -%}
+      {%- if 'osImage' in declared -%}{%- set _ = out.append({'name': 'osImage', 'value': {'artifactName': _e2e_artifact}}) -%}{%- endif -%}
+      {%- if 'network' in declared -%}{%- set _ = out.append({'name': 'network', 'value': {'subnet': 'primary'}}) -%}{%- endif -%}
+      {{ out }}
+    _ca_wclass: >-
+      {{ (((_ca_cc.stdout | from_json).spec.workers.machineDeployments | default([{}], true) | first).class | default('default-worker'))
+         if _ca_cc.rc == 0 else 'default-worker' }}
+
+- name: cluster {{ key }} | apply {{ _e2e_envs[key].ns }}/{{ _e2e_envs[key].cluster }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: "{{ 'cluster.x-k8s.io/v1beta2' if kmv_capi_v1beta2 else 'cluster.x-k8s.io/v1beta1' }}"
+      kind: Cluster
+      metadata:
+        name: "{{ _e2e_envs[key].cluster }}"
+        namespace: "{{ _e2e_envs[key].ns }}"
+        labels: "{{ {kmv_label_key: kmv_rid} }}"
+      spec:
+        clusterNetwork:
+          pods: {cidrBlocks: ["{{ kmv_e2e_pod_cidr }}"]}
+          services: {cidrBlocks: ["{{ kmv_e2e_svc_cidr }}"]}
+        topology: >-
+          {{ ({'classRef': {'name': kmv_cc, 'namespace': kmv_ns_capi}} if kmv_capi_v1beta2 else {'class': kmv_cc, 'classNamespace': kmv_ns_capi})
+             | combine({'version': _e2e_tag, 'variables': _ca_vars,
+                        'workers': {'machineDeployments': [{'class': _ca_wclass, 'name': 'md-0', 'replicas': _e2e_envs[key].workers}]}}) }}
+  register: _ca_apply
+  ignore_errors: true
+
+- name: cluster {{ key }} | applied
+  ansible.builtin.set_fact:
+    _e2e_applied: "{{ _e2e_applied + [key] }}"
+  when: not (_ca_apply.failed | default(false))
+
+- name: cluster {{ key }} | verdicts
+  kmv_record:
+    group: "{{ _e2e_envs[key].group }}"
+    verdicts: >-
+      {%- set e = _e2e_envs[key] -%}
+      {%- set names = _ca_vars | map(attribute='name') | list -%}
+      {%- set v = [] -%}
+      {%- if 'network' not in names -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': 'ClusterClass ' ~ kmv_cc ~ " declares no 'network' variable: workers may not join the SubnetClaim"}) -%}
+      {%- endif -%}
+      {%- if 'osImage' not in names -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'ClusterClass ' ~ kmv_cc ~ ' has no osImage variable; the image follows the version ' ~ _e2e_tag}) -%}
+      {%- endif -%}
+      {%- if _ca_apply.failed | default(false) -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'cannot create Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ': ' ~ _ca_apply.msg | default('') | truncate(200)}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ' applied: ' ~ kmv_cc ~ ', ' ~ _e2e_tag ~ ', ' ~ e.workers ~ ' worker(s)'}) -%}
+      {%- endif -%}
+      {{ v }}

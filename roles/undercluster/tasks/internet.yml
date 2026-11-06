@@ -1,0 +1,53 @@
+---
+# internet: on each network of the node, curl the probe URL and ping the probe IP bound to
+# the network's interface; only kmv_internet_network may succeed. Plus a DNS lookup.
+
+- name: internet | probe each network
+  ansible.builtin.shell: |
+    if getent hosts {{ kmv_dns_probe | quote }} >/dev/null; then echo "dns - ok"; else echo "dns - fail"; fi
+    {% for net, cfg in kmv_networks.items() if net in kmv_addresses %}
+    if command -v curl >/dev/null && curl -sS -o /dev/null --max-time 6 --interface {{ cfg.interface | quote }} {{ kmv_internet_probe_url | quote }} 2>/dev/null; then echo "curl {{ net }} ok"; else echo "curl {{ net }} fail"; fi
+    if ping -c2 -W2 -q -I {{ cfg.interface | quote }} {{ kmv_internet_probe_ip | quote }} >/dev/null 2>&1; then echo "icmp {{ net }} ok"; else echo "icmp {{ net }} fail"; fi
+    {% endfor %}
+    exit 0
+  args:
+    executable: /bin/bash
+  register: _uc_inet
+  changed_when: false
+
+- name: internet | verdicts
+  kmv_record:
+    group: internet
+    verdicts: >-
+      {%- set n = inventory_hostname -%}
+      {%- set r = {} -%}
+      {%- for line in _uc_inet.stdout_lines -%}
+      {%-   set w = line.split(' ') -%}
+      {%-   set _ = r.update({w[0] ~ '|' ~ w[1]: w[2] | default('')}) -%}
+      {%- endfor -%}
+      {%- set v = [] -%}
+      {%- if r['dns|-'] | default('') == 'ok' -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': n ~ ': resolves ' ~ kmv_dns_probe}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': n ~ ': cannot resolve ' ~ kmv_dns_probe}) -%}
+      {%- endif -%}
+      {%- set ns = namespace(leaks=0) -%}
+      {%- for net, cfg in kmv_networks.items() if net in kmv_addresses -%}
+      {%-   if net == kmv_internet_network -%}
+      {%-     if r['curl|' ~ net] | default('') == 'ok' -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': n ~ ': reaches ' ~ kmv_internet_probe_url ~ ' through ' ~ net}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ': cannot reach ' ~ kmv_internet_probe_url ~ ' through ' ~ net ~ ' (' ~ cfg.interface ~ ')'}) -%}
+      {%-     endif -%}
+      {%-     if r['icmp|' ~ net] | default('') != 'ok' -%}
+      {%-       set _ = v.append({'level': 'INFO', 'msg': n ~ ': no ICMP reply from ' ~ kmv_internet_probe_ip ~ ' through ' ~ net ~ ' (may be filtered)'}) -%}
+      {%-     endif -%}
+      {%-   elif r['curl|' ~ net] | default('') == 'ok' or r['icmp|' ~ net] | default('') == 'ok' -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': n ~ ': ' ~ net ~ ' (' ~ cfg.interface ~ ') reaches the internet; only ' ~ kmv_internet_network ~ ' should'}) -%}
+      {%-     set ns.leaks = ns.leaks + 1 -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if ns.leaks == 0 -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': n ~ ': no network other than ' ~ kmv_internet_network ~ ' reaches the internet'}) -%}
+      {%- endif -%}
+      {{ v }}

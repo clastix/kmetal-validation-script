@@ -1,0 +1,130 @@
+---
+# Platform checks and end-to-end tests against the under cluster API.
+#
+#   ansible-playbook -i inventory/<site> kmetal.yml --skip-tags e2e,e2e-tenants   # platform only
+#   ansible-playbook -i inventory/<site> kmetal.yml --tags e2e,e2e-tenants        # e2e only
+#   ansible-playbook kmetal.yml -e kmv_kubeconfig=admin.conf                      # no inventory
+#
+# Check groups (tags): platform operator metallb storage nodes providers tenancy capi
+# kubevirt crds e2e e2e-tenants. Help: ansible-playbook help.yml -e cmd=kmetal
+# The inventory is optional; with it, checks that need SSH to the nodes run too.
+
+- name: kmetal
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - common
+  vars:
+    kmv_need_kube: true
+  environment:
+    KUBECONFIG: "{{ kmv_kubeconfig | expanduser }}"
+  module_defaults:
+    group/kubernetes.core.k8s:
+      kubeconfig: "{{ kmv_kubeconfig | expanduser }}"
+  tasks:
+    - name: Prepare
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: prepare
+      tags: [always]
+
+    - name: Checks
+      block:
+        - name: Platform
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: platform
+          tags: [platform]
+
+        - name: Operator
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: operator
+          tags: [operator]
+
+        - name: MetalLB
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: metallb
+          tags: [metallb]
+
+        - name: Storage
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: storage
+          tags: [storage]
+
+        - name: Node labels and central nodes
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: nodes
+          tags: [nodes]
+
+        - name: Provider networks
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: providers
+          tags: [providers]
+
+        - name: Tenancy
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: tenancy
+          tags: [tenancy]
+
+        - name: Cluster API
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: capi
+          tags: [capi]
+
+        - name: KubeVirt
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: kubevirt
+          tags: [kubevirt]
+
+        - name: CRDs and golden images
+          ansible.builtin.import_role:
+            name: kmetal
+            tasks_from: crds
+          tags: [crds]
+
+        - name: End-to-end tests
+          ansible.builtin.import_role:
+            name: e2e
+          tags: [e2e, e2e-tenants]
+
+      always:
+        - name: Keep the test resources
+          kmv_record:
+            group: cleanup
+            verdicts:
+              - level: INFO
+                msg: "kmv_keep: test resources of run {{ kmv_rid }} kept"
+          when: kmv_created | default(false) and kmv_keep | bool
+          tags: [always]
+
+        - name: Delete the test resources
+          ansible.builtin.include_role:
+            name: cleanup
+            apply:
+              tags: [always]
+          vars:
+            _cl_rid: "{{ kmv_rid }}"
+          when: kmv_created | default(false) and not kmv_keep | bool
+          tags: [always]
+
+- name: kmetal | summary
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - common
+  tasks:
+    - name: Summary
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: summary
+      tags: [always]
