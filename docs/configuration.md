@@ -113,8 +113,9 @@ On air-gapped sites, point the three image keys and `INTERNET_PROBE_URL` at inte
 
 | Key | Default | Meaning |
 |---|---|---|
-| `KMETAL_NAMESPACE` | `kmetal-operator-system` | Namespace of the operator's Helm release |
-| `KMETAL_RELEASE` | `kmetal-operator` | Helm release, or Flux HelmRelease, name |
+| `KMETAL_NAMESPACE` | `kmetal-operator-system` | Namespace searched first for the operator's Helm release; `kmetal-flux` is searched next |
+| `KMETAL_RELEASE` | `kmetal-operator` | Helm release, or Flux HelmRelease, name; `<namespace>-KMETAL_RELEASE` also matches |
+| `KMETAL_CHART` | `kmetal-operator` | Chart of the operator; a Helm release installing it matches whatever its name |
 
 ## Validation
 

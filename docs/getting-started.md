@@ -124,7 +124,7 @@ kmetal-validate 0.1.0  command=undercluster  run=40213  env=./setup.env
 == interfaces ==
   PASS worker-01: overlay bond0.105 VLAN 105 MTU 9000 172.22.105.12/24 (on bond0)
   FAIL worker-02: provider provider (bond0.106): carries IPv4 172.22.106.13: a provider interface must have no address
-  INFO cp-01: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes (kmetal.io/ovn) only
+  INFO cp-01: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes (node-role.kubernetes.io/network) only
 
 == summary ==
   41 passed, 2 warnings, 1 failures

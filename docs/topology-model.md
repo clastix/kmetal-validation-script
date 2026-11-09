@@ -11,7 +11,7 @@ documentation. Each rule names the check that enforces it.
 |---|---|---|
 | Control plane | `cp` in `setup.env`; `node-role.kubernetes.io/control-plane` in the cluster | The under cluster control plane, platform controllers, ovn-central (the Kube-OVN central nodes), Kamaji tenant control planes and their etcd by default |
 | Compute | `node-role.kubernetes.io/compute` | Tenant VMs (`virt-handler`), image-builder VMs |
-| Network | `kmetal.io/ovn` | Kube-OVN's per-node components (`kube-ovn-cni`, `ovs-ovn`), the overlay tunnel, the OVN gateways and provider bridges |
+| Network | `node-role.kubernetes.io/network` (empty value); normally the workers | Kube-OVN's per-node components (`kube-ovn-cni`, `ovs-ovn`, `kube-ovn-pinger`), the overlay tunnel, the OVN gateways and provider bridges |
 
 On small sites, workers are both compute and network nodes.
 
@@ -45,25 +45,33 @@ Rules and the checks that enforce them:
 
 ### Why control planes need no overlay
 
-Kube-OVN's tunnel and per-node components run only where `kmetal.io/ovn` is set, and that label
+Kube-OVN's tunnel and per-node components run only where `node-role.kubernetes.io/network` is
+set, and that label
 belongs on network nodes. ovn-central, which runs on the control planes, uses the node's own
 address for OVSDB Raft, not the tunnel. A control plane without an overlay interface is
 therefore the expected layout and reported as INFO.
 
 ## Node labels
 
-Operator 1.0.0 sets **no** node label: the administrator applies all of them before installing.
-Checked by `kmetal` → `nodes`.
+The administrator applies the role labels (`compute`, `network`); the kMetal operator derives
+`ovn.kubernetes.io/external-gw`, `kube-ovn/role=master` and the removal of the MetalLB exclusion
+label from them. Checked by `kmetal` → `nodes`.
 
 | Label | Where | If missing or misplaced |
 |---|---|---|
 | `node-role.kubernetes.io/compute` | At least one node, normally the workers | FAIL: no tenant machine or image-builder VM can start, while the install still reports healthy |
-| `kmetal.io/ovn` (any value) | Network nodes only | FAIL if no node has it. WARN on a control plane |
-| `ovn.kubernetes.io/external-gw=true` | Every network node | FAIL: VPCs with external access have no gateway |
-| `kube-ovn/role=master` | Every node in `spec.networking.kubeOVN.centralNodes` | FAIL on a central node without it. WARN on a node that has it but is not central |
+| `node-role.kubernetes.io/network=` (empty value) | Network nodes only, normally the workers | FAIL if no node has it, or if its value is not empty (the DaemonSets do not match `=true`). WARN on a control plane |
+| `ovn.kubernetes.io/external-gw=true` | Every network node (set by the operator) | FAIL: VPCs with external access have no gateway |
+| `kmetal.io/ovn=true` (the value the networking agent selects) | Every network node; applied by the administrator | FAIL: the kmetal-networking agent does not run there, and tenant workers never join. WARN on a control plane |
+| `kube-ovn/role=master` | Every node in `spec.networking.kubeOVN.centralNodes` (set by the operator) | FAIL on a central node without it. WARN on a node that has it but is not central |
 | `node.kubernetes.io/exclude-from-external-load-balancers` | **No control plane** (kubeadm sets it by default) | FAIL: MetalLB speakers must announce from the control planes, and this label stops them. Remove it with `kubectl label node <n> node.kubernetes.io/exclude-from-external-load-balancers-` |
 
-`node-role.kubernetes.io/network` is not used by 1.0.0 and is reported as INFO.
+`kmetal.io/ovn=true` is **still required on every network node**. The operator no longer
+sets it and Kube-OVN no longer reads it, but the kmetal-networking agent DaemonSet
+(`kmetal-system-kmetal-networking-agent`, chart kmetal-networking 1.12.0) selects its nodes
+with it. Without the label the agent runs on no node, and tenant workers boot but never join
+their cluster. The check reads the selector from the DaemonSet, so it follows the chart if the
+selector changes.
 
 ## Kube-OVN central nodes
 

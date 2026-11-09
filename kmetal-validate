@@ -51,6 +51,7 @@ ENCAP_TEST_PORT=6090
 
 KMETAL_NAMESPACE=kmetal-operator-system
 KMETAL_RELEASE=kmetal-operator
+KMETAL_CHART=kmetal-operator
 
 E2E_SUBNET_CIDR=10.250.0.0/24
 E2E_CLUSTERCLASS=""
@@ -742,7 +743,7 @@ uc_interfaces() {
                 if in_list "$net" "$OPTIONAL_NETWORKS"; then
                     info "$n: optional network $net not configured"
                 elif [[ $net == overlay && ${NODE_ROLE[$n]} == cp ]]; then
-                    info "$n: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes (kmetal.io/ovn) only$(is_central "$n" && echo "; ovn-central uses the node address")"
+                    info "$n: control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes (node-role.kubernetes.io/network) only$(is_central "$n" && echo "; ovn-central uses the node address")"
                 else
                     fail "$n: no $net address declared; ${NODE_ROLE[$n]} nodes need the $net network"
                 fi
@@ -1090,23 +1091,36 @@ check_operator_version() { # check_operator_version VERSION
 }
 
 km_operator() {
-    local rel status chart ver op_ns=$KMETAL_NAMESPACE
-    rel=$(helm list -n "$KMETAL_NAMESPACE" -a -o json 2>/dev/null | jq -c --arg r "$KMETAL_RELEASE" '.[] | select(.name == $r)')
+    local rel status chart ver relname relns ns op_ns=$KMETAL_NAMESPACE
+    # Helm releases of the operator chart, in the operator namespace or in kmetal-flux: a
+    # release named KMETAL_RELEASE, one named <namespace>-KMETAL_RELEASE (Flux helm-controller
+    # naming), or any release of the KMETAL_CHART chart.
+    # Every release state, with flags both Helm 3 and Helm 4 accept (Helm 4 dropped -a/--all).
+    for ns in $KMETAL_NAMESPACE $NS_FLUX; do
+        rel=$(helm list -n "$ns" --deployed --failed --pending --superseded --uninstalling -o json 2>/dev/null | jq -c --arg r "$KMETAL_RELEASE" --arg c "$KMETAL_CHART" '
+            [.[] | select(.name == $r or (.name | endswith("-" + $r))
+                          or (.chart | test("^" + $c + "-v?[0-9]")))][0] // empty')
+        [[ -n $rel ]] && break
+    done
     if [[ -n $rel ]]; then
+        relname=$(jq -r .name <<<"$rel")
+        relns=$(jq -r .namespace <<<"$rel")
         status=$(jq -r .status <<<"$rel")
         chart=$(jq -r .chart <<<"$rel")
-        ver=${chart#"$KMETAL_RELEASE"-}
-        [[ $status == deployed ]] && pass "helm release $KMETAL_RELEASE is deployed ($chart)" ||
-            fail "helm release $KMETAL_RELEASE is $status ($chart)"
+        ver=${chart#"$KMETAL_CHART"-}
+        op_ns=$relns
+        [[ $status == deployed ]] && pass "helm release $relns/$relname is deployed ($chart)" ||
+            fail "helm release $relns/$relname is $status ($chart)"
         check_operator_version "$ver"
     else
-        # Not installed with helm in $KMETAL_NAMESPACE: look for a Flux HelmRelease (GitOps install).
+        # No Helm release visible (no helm, or no access to its secrets): look for the Flux
+        # HelmRelease object (GitOps install).
         local hr name ready
         hr=$(kubectl get helmreleases.helm.toolkit.fluxcd.io -n "$NS_FLUX" -o json 2>/dev/null |
-             jq -c --arg r "$KMETAL_RELEASE" '[.items[] | select(.metadata.name == $r
-                     or .spec.releaseName == $r or .spec.chart.spec.chart == $r)][0] // empty')
+             jq -c --arg r "$KMETAL_RELEASE" --arg c "$KMETAL_CHART" '[.items[] | select(.metadata.name == $r
+                     or .spec.releaseName == $r or .spec.chart.spec.chart == $c)][0] // empty')
         if [[ -z $hr ]]; then
-            fail "operator not found: no helm release $KMETAL_RELEASE in $KMETAL_NAMESPACE, no HelmRelease $KMETAL_RELEASE in $NS_FLUX"
+            fail "operator not found: no helm release of chart $KMETAL_CHART in $KMETAL_NAMESPACE or $NS_FLUX, no HelmRelease $KMETAL_RELEASE in $NS_FLUX"
         else
             name=$(jq -r .metadata.name <<<"$hr")
             ready=$(jq -r '[.status.conditions[]? | select(.type == "Ready") | .status] | first // "Unknown"' <<<"$hr")
@@ -1262,26 +1276,52 @@ km_storage() {
 
     if [[ -n ${role_of[uc]:-} ]]; then
         prov=$(kubectl get storageclass "$uc" -o jsonpath='{.provisioner}')
-        vsc=$(km .spec.clusterClass.values.dataVolume.volumeSnapshotClass)
+        # The VolumeSnapshotClass serving underclusterClassName: the one named in
+        # clusterClass.values.dataVolume when it exists on that class's driver, else the
+        # driver's default class, else any class of that driver. Only this class needs one.
+        local want vscs
+        want=$(km .spec.clusterClass.values.dataVolume.volumeSnapshotClass)
+        vscs=$(kubectl get volumesnapshotclass -o json 2>/dev/null | jq -c --arg d "$prov" '[.items[] | select(.driver == $d)]')
+        vsc=$(jq -r --arg w "$want" '(map(select(.metadata.name == $w))
+              + map(select(.metadata.annotations["snapshot.storage.kubernetes.io/is-default-class"] == "true")) + .)[0].metadata.name // empty' <<<"${vscs:-[]}")
+        if [[ -n $want && $want != "$vsc" ]]; then
+            j=$(kubectl get volumesnapshotclass "$want" -o json 2>/dev/null)
+            if [[ -z $j ]]; then
+                fail "clusterClass.values.dataVolume.volumeSnapshotClass $want does not exist${vsc:+; $uc is served by $vsc}"
+            else
+                fail "clusterClass.values.dataVolume.volumeSnapshotClass $want uses driver $(jq -r .driver <<<"$j"), underclusterClassName $uc uses $prov${vsc:+; $uc is served by $vsc}"
+            fi
+        fi
         if [[ -n $vsc ]]; then
-            j=$(kubectl get volumesnapshotclass "$vsc" -o json 2>/dev/null)
-            if [[ -z $j ]]; then fail "VolumeSnapshotClass $vsc (clusterClass.values.dataVolume) does not exist"; vsc=""
-            elif [[ $(jq -r .driver <<<"$j") != "$prov" ]]; then
-                fail "VolumeSnapshotClass $vsc uses driver $(jq -r .driver <<<"$j"), $uc uses $prov"
-            else pass "VolumeSnapshotClass $vsc on driver $prov"; fi
+            pass "VolumeSnapshotClass $vsc serves underclusterClassName $uc (driver $prov)"
         else
-            vsc=$(kubectl get volumesnapshotclass -o json 2>/dev/null | jq -r --arg d "$prov" '[.items[] | select(.driver == $d)] |
-                  (map(select(.metadata.annotations["snapshot.storage.kubernetes.io/is-default-class"] == "true")) + .)[0].metadata.name // empty')
-            if [[ -n $vsc ]]; then pass "VolumeSnapshotClass $vsc on driver $prov (clusterClass.values.dataVolume.volumeSnapshotClass not set)"
-            else fail "no VolumeSnapshotClass for driver $prov: golden images cannot be snapshotted, no tenant machine boots"; fi
+            fail "no VolumeSnapshotClass for underclusterClassName $uc (driver $prov): golden images cannot be snapshotted, no tenant machine boots"
         fi
         local sp clone snapc
         sp=$(kubectl get storageprofile "$uc" -o json 2>/dev/null)
         clone=$(jq -r '.status.cloneStrategy // empty' <<<"$sp")
         snapc=$(jq -r '.status.snapshotClass // empty' <<<"$sp")
         if [[ -z $sp ]]; then warn "no CDI StorageProfile $uc"
-        elif [[ -z $snapc ]]; then fail "StorageProfile $uc has no snapshotClass: tenant machines will not boot"
-        else pass "StorageProfile $uc: cloneStrategy ${clone:-default}, snapshotClass $snapc"; fi
+        elif [[ -z $snapc ]]; then
+            fail "StorageProfile $uc (underclusterClassName) has no snapshotClass${vsc:+ (expected $vsc)}: tenant machines will not boot"
+            if [[ -n $vsc ]]; then
+                # CDI fills status.snapshotClass itself, but only watches VolumeSnapshotClasses when the
+                # snapshot CRDs existed at its start: compare the two times.
+                local crd_t cdi_t hb
+                crd_t=$(kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+                cdi_t=$(kubectl get pods -A -l app=containerized-data-importer -o json 2>/dev/null |
+                        jq -r '[.items[] | select(.metadata.name | startswith("cdi-deployment")) | .status.startTime] | min // empty')
+                hb=$(jq -r '[.status.conditions[]?.lastHeartbeatTime] | max // empty' <<<"$sp")
+                {
+                    echo "$vsc exists, so CDI has not refreshed this profile (last reconcile ${hb:-unknown})."
+                    [[ -n $crd_t && -n $cdi_t && $crd_t > $cdi_t ]] &&
+                        echo "The snapshot CRDs ($crd_t) were installed after the CDI controller started ($cdi_t): it does not watch VolumeSnapshotClasses."
+                    echo "Fix: kubectl rollout restart deployment/cdi-deployment -n <cdi namespace>, or set spec.snapshotClass: $vsc on the StorageProfile"
+                } | detail
+            fi
+        elif [[ -n $vsc && $snapc != "$vsc" ]]; then
+            warn "StorageProfile $uc names snapshotClass $snapc, the class serving underclusterClassName is $vsc"
+        else pass "StorageProfile $uc (underclusterClassName): cloneStrategy ${clone:-default}, snapshotClass $snapc"; fi
         STORAGE_CLONE=$clone
     fi
 
@@ -1368,24 +1408,63 @@ km_nodes() {
         fi
     done
 
-    # network nodes: kmetal.io/ovn, where Kube-OVN's per-node components run (never the control planes)
-    network=$(jq -r '.items[] | select(.metadata.labels | has("kmetal.io/ovn")) | .metadata.name' <<<"$nodes")
+    # network nodes: node-role.kubernetes.io/network, the label Kube-OVN's per-node DaemonSets
+    # (ovs-ovn, kube-ovn-cni, kube-ovn-pinger) select on; normally the workers, never the control planes
+    local netl=node-role.kubernetes.io/network
+    network=$(jq -r --arg k "$netl" '.items[] | select(.metadata.labels | has($k)) | .metadata.name' <<<"$nodes")
     local cni
     cni=$(kubectl get pods -A -l app=kube-ovn-cni -o json 2>/dev/null | jq -r "$pods_not_ok_jq"'.items[] | select(ok) | .spec.nodeName')
-    if [[ -z $network ]]; then
-        fail "no node labelled kmetal.io/ovn: Kube-OVN's per-node DaemonSets run nowhere"
+
+    # The kmetal-networking agent (DaemonSet of the kmetal-networking chart) selects its nodes with
+    # kmetal.io/ovn=true, a label the 1.0.1 operator no longer sets. Without it the agent runs nowhere
+    # and tenant workers never join their cluster. Its selector is read from the DaemonSet.
+    local agent agent_name agent_sel agent_ready
+    agent=$(kubectl get ds -A -l app.kubernetes.io/name=kmetal-networking,app.kubernetes.io/component=agent -o json 2>/dev/null |
+            jq -c '.items[0] // empty')
+    if [[ -n $agent ]]; then
+        agent_name=$(jq -r '"\(.metadata.namespace)/\(.metadata.name)"' <<<"$agent")
+        agent_sel=$(jq -c '.spec.template.spec.nodeSelector // {}' <<<"$agent")
+        agent_ready=$(kubectl get pods -n "$(jq -r .metadata.namespace <<<"$agent")" \
+            -l app.kubernetes.io/name=kmetal-networking,app.kubernetes.io/component=agent -o json 2>/dev/null |
+            jq -r "$pods_not_ok_jq"'.items[] | select(ok) | .spec.nodeName')
     else
-        pass "network nodes (kmetal.io/ovn): $(tr '\n' ' ' <<<"$network")"
+        agent_sel='{"kmetal.io/ovn":"true"}'
+    fi
+    if [[ -z $network ]]; then
+        fail "no node labelled $netl: Kube-OVN's per-node DaemonSets run nowhere (kubectl label node <worker> $netl=)"
+    else
+        pass "network nodes ($netl): $(tr '\n' ' ' <<<"$network")"
         local tif
         tif=$(km .spec.networking.kubeOVN.tunnelInterface)
         for n in $network; do
             if in_list "$n" "$cps"; then
-                warn "$n: control plane labelled kmetal.io/ovn; the label belongs on network nodes only (kubectl label node $n kmetal.io/ovn-)"
+                warn "$n: control plane labelled $netl; the label belongs on network nodes only (kubectl label node $n $netl-)"
             fi
+            [[ -z $(label_val "$n" "$netl") ]] ||
+                fail "$n: $netl=$(label_val "$n" "$netl"); the value must be empty, Kube-OVN's DaemonSets do not match it (kubectl label node $n --overwrite $netl=)"
             [[ $(label_val "$n" ovn.kubernetes.io/external-gw) == true ]] &&
                 pass "$n: ovn.kubernetes.io/external-gw=true" ||
-                fail "$n: ovn.kubernetes.io/external-gw=true missing (operator 1.0.0 does not set it)"
+                fail "$n: ovn.kubernetes.io/external-gw=true missing on a network node (the kMetal operator sets it: check its node labelling)"
             grep -qx "$n" <<<"$cni" && pass "$n: kube-ovn-cni Ready" || fail "$n: no Ready kube-ovn-cni pod"
+            # every label the networking agent selects on (kmetal.io/ovn=true)
+            local k v have
+            while IFS=$'\t' read -r k v; do
+                [[ -z $k ]] && continue
+                if ! has_label "$n" "$k"; then
+                    fail "$n: $k=$v missing on a network node: the kmetal-networking agent selects it, without it tenant workers never join (kubectl label node $n $k=$v)"
+                    continue
+                fi
+                have=$(label_val "$n" "$k")
+                if [[ $have == "$v" ]]; then
+                    pass "$n: $k=$v"
+                else
+                    fail "$n: $k=$have, the kmetal-networking agent selects $k=$v (kubectl label node $n --overwrite $k=$v)"
+                fi
+            done < <(jq -r 'to_entries[] | [.key, .value] | @tsv' <<<"$agent_sel")
+            if [[ -n $agent ]]; then
+                grep -qx "$n" <<<"$agent_ready" && pass "$n: kmetal-networking agent Ready" ||
+                    fail "$n: no Ready kmetal-networking agent pod ($agent_name)"
+            fi
             if ((HAVE_ENV)) && [[ -n ${NODE_ROLE[$n]:-} && -n $tif ]]; then
                 node_cmd "$n" "ip link show dev $tif >/dev/null 2>&1" 2>/dev/null &&
                     pass "$n: tunnelInterface $tif present" ||
@@ -1393,8 +1472,17 @@ km_nodes() {
             fi
         done
     fi
-    jq -e 'any(.items[]; .metadata.labels | has("node-role.kubernetes.io/network"))' <<<"$nodes" >/dev/null &&
-        info "node-role.kubernetes.io/network is set on some nodes; kMetal 1.0.0 places Kube-OVN by kmetal.io/ovn"
+    if [[ -z $agent ]]; then
+        info "no kmetal-networking agent DaemonSet found (labels app.kubernetes.io/name=kmetal-networking, component=agent): kmetal.io/ovn=true still required on network nodes"
+    else
+        info "kmetal-networking agent $agent_name selects $(jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$agent_sel"), desired $(jq -r '.status.desiredNumberScheduled // 0' <<<"$agent"), ready $(jq -r '.status.numberReady // 0' <<<"$agent")"
+        [[ $(jq -r '.status.desiredNumberScheduled // 0' <<<"$agent") == 0 ]] &&
+            fail "kmetal-networking agent $agent_name is scheduled on no node: no node matches its nodeSelector $agent_sel"
+    fi
+    for n in $cps; do
+        has_label "$n" kmetal.io/ovn &&
+            warn "$n: control plane labelled kmetal.io/ovn; the networking agent belongs on network nodes only (kubectl label node $n kmetal.io/ovn-)"
+    done
 
     # central nodes: the OVSDB Raft members, the control planes when there are three
     central=$(km '.spec.networking.kubeOVN.centralNodes[]?')
@@ -1410,7 +1498,7 @@ km_nodes() {
             fi
             [[ $(label_val "$n" kube-ovn/role) == master ]] &&
                 pass "$n: kube-ovn/role=master (central node)" ||
-                fail "$n: kube-ovn/role=master missing on a central node (operator 1.0.0 does not set it)"
+                fail "$n: kube-ovn/role=master missing on a central node (the kMetal operator sets it from centralNodes: check its node labelling)"
             if in_list "$n" "$cps"; then
                 ncp_central=$((ncp_central + 1))
             else
@@ -1438,7 +1526,7 @@ km_nodes() {
 km_providers() {
     local nodes network spec n
     nodes=$(kubectl get nodes -o json)
-    network=$(jq -r '.items[] | select(.metadata.labels | has("kmetal.io/ovn")) | .metadata.name' <<<"$nodes")
+    network=$(jq -r '.items[] | select(.metadata.labels | has("node-role.kubernetes.io/network")) | .metadata.name' <<<"$nodes")
     spec=$(kmj '[.spec.networking.providerNetworks[]?]')
     if [[ -z $spec || $(jq length <<<"$spec") == 0 ]]; then
         warn "no providerNetworks in the KMetal resource: tenants get no external access"
@@ -2474,13 +2562,14 @@ EOF
     kmetal:operator) cat <<'EOF'
 operator - kmetal-operator release, version and Flux delivery
 
-  Finds the operator as the Helm release kmetal-operator in kmetal-operator-system,
-  or else as a Flux HelmRelease in kmetal-flux (GitOps install). Checks its pods,
-  every HelmRelease, Kustomization and OCIRepository in kmetal-flux, and pods
-  anywhere in the cluster.
+  Finds the operator as a Helm release in kmetal-operator-system, then kmetal-flux:
+  named kmetal-operator, <namespace>-kmetal-operator (Flux naming), or installing the
+  kmetal-operator chart. Without one, a Flux HelmRelease object in kmetal-flux (GitOps
+  install). Checks its pods, every HelmRelease, Kustomization and OCIRepository in
+  kmetal-flux, and pods anywhere in the cluster.
 
   PASS  Helm release deployed, or Flux HelmRelease present
-  FAIL  operator not found; operator pods not ready; a Flux object not Ready
+  FAIL  operator not found; release not deployed; operator pods not ready; a Flux object not Ready
   WARN  chart version not 1.0.x; pods outside Running/Completed elsewhere
   Needs kubeconfig
 EOF
@@ -2503,8 +2592,9 @@ EOF
 storage - storage classes, snapshots and live volumes
 
   underclusterClassName and tenantClassName must exist and differ, etcdClassName
-  exists if set. The VolumeSnapshotClass must use the platform class's driver and
-  the CDI StorageProfile must name it. Smoke tests: per class, a 1 Gi PVC and a
+  exists if set. Only underclusterClassName needs a VolumeSnapshotClass: the one named
+  in clusterClass.values.dataVolume, else its driver's default; its CDI StorageProfile
+  must name it. Smoke tests: per class, a 1 Gi PVC and a
   write/read pod placed where the real consumer runs (compute nodes; spec.placement
   for etcd); then snapshot the platform volume, restore it and WRITE to the copy.
 
@@ -2515,17 +2605,21 @@ storage - storage classes, snapshots and live volumes
 EOF
     ;;
     kmetal:nodes) cat <<'EOF'
-nodes - node labels and Kube-OVN central nodes (kMetal 1.0.0 sets none of them)
+nodes - node labels and Kube-OVN central nodes
 
   Control planes: no node.kubernetes.io/exclude-from-external-load-balancers.
   Compute: node-role.kubernetes.io/compute, with a Ready virt-handler.
-  Network nodes (kmetal.io/ovn, never control planes): ovn.kubernetes.io/external-gw
-  =true, a Ready kube-ovn-cni, and the tunnelInterface (over SSH with setup.env).
+  Network nodes: node-role.kubernetes.io/network with an empty value (the workers,
+  never control planes), where Kube-OVN's DaemonSets run: ovn.kubernetes.io/external-gw
+  =true, a Ready kube-ovn-cni, the tunnelInterface (over SSH with setup.env), and the
+  labels the kmetal-networking agent DaemonSet selects (kmetal.io/ovn=true) with a Ready
+  agent pod: without it tenant workers never join their cluster.
   centralNodes: each labelled kube-ovn/role=master; ideally the three control planes.
 
-  FAIL  exclusion label on a control plane; no compute or network node; missing
-        external-gw, kube-ovn-cni, tunnel interface or kube-ovn/role=master
-  WARN  kmetal.io/ovn on a control plane; a worker in centralNodes; fewer than three
+  FAIL  exclusion label on a control plane; no compute or network node; network label
+        with a value; missing external-gw, kube-ovn-cni, tunnel interface,
+        kmetal.io/ovn=true, networking agent or kube-ovn/role=master
+  WARN  network label or kmetal.io/ovn on a control plane; a worker in centralNodes; fewer than three
         control planes used while available; fewer than 3 or an even number of
         central nodes; kube-ovn/role=master outside centralNodes
   Needs kubeconfig; setup.env optional

@@ -33,18 +33,22 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 | `… exclude-from-external-load-balancers is set …` | kubeadm labels control planes this way by default; MetalLB speakers then do not announce from them | `kubectl label node <n> node.kubernetes.io/exclude-from-external-load-balancers-` |
 | `no Ready MetalLB speaker on this control plane` (WARN) | Speaker DaemonSet not scheduled there (label, taint or node selector) | `kubectl get ds -n kmetal-metallb`; check tolerations and the exclusion label |
 | `component X is Pending/Failed: …` | The first non-Ready component blocks the ones after it | Read the message; check the Flux object of that component in `kmetal-flux` |
-| `operator not found` | Installed under another release or namespace | Set `KMETAL_RELEASE` / `KMETAL_NAMESPACE` in `setup.env` |
+| `operator not found` | Installed in another namespace, or from a renamed chart | `helm list -A \| grep kmetal`; set `KMETAL_NAMESPACE`, `KMETAL_RELEASE` or `KMETAL_CHART` in `setup.env` |
 | `operator chart is X; this script validates 1.0.x` (WARN) | Different kMetal version | Results may not match that version's rules; interpret them with care |
 | `loadBalancer.<role> … is not in any IPAddressPool` | Spec and MetalLB pools drifted | Let the operator reconcile, or fix the spec |
 | `Service from pool … got no EXTERNAL-IP` | Pool exhausted, or the MetalLB controller is unhealthy | `kubectl get ipaddresspool -n kmetal-metallb -o yaml`; free addresses |
 | `no VolumeSnapshotClass for driver …` | CSI driver without snapshot support, or the class is missing | Install the snapshot class for the platform storage driver |
-| `StorageProfile … has no snapshotClass` | CDI does not recognise the provisioner | Patch the StorageProfile with the snapshot class and the clone strategy |
+| `StorageProfile … has no snapshotClass` | No VolumeSnapshotClass on the platform class's driver; or one exists but CDI never refreshed the profile, because the snapshot CRDs were installed after the CDI controller started (the lines under the FAIL compare the times) | Create the snapshot class; for a stale profile, `kubectl rollout restart deployment/cdi-deployment -n system-cdi`, or set `spec.snapshotClass` on the StorageProfile |
 | `volume restored from a … snapshot is not usable` | The driver restores snapshots read-only | FAIL when the StorageProfile clones by snapshot: use another backend for the platform class, or a `copy` clone strategy |
 | `<class>: PVC/pod smoke test did not complete` | Provisioning failure, or the pod cannot be scheduled (e.g. a node-local class on nodes without its path) | Read the PVC events printed under the message |
 | `no node labelled node-role.kubernetes.io/compute` | Labels not applied; the platform still reports healthy | `kubectl label node <n> node-role.kubernetes.io/compute=` |
-| `ovn.kubernetes.io/external-gw=true missing` | Operator 1.0.0 does not set it | `kubectl label node <n> ovn.kubernetes.io/external-gw=true` |
-| `kube-ovn/role=master missing on a central node` | Operator 1.0.0 does not set it | `kubectl label node <n> kube-ovn/role=master` |
-| `control plane labelled kmetal.io/ovn` (WARN) | Kube-OVN per-node components scheduled on a control plane without overlay | `kubectl label node <n> kmetal.io/ovn-` |
+| `no node labelled node-role.kubernetes.io/network` | Network nodes not labelled; Kube-OVN's DaemonSets run nowhere | `kubectl label node <worker> node-role.kubernetes.io/network=` |
+| `node-role.kubernetes.io/network=<value>; the value must be empty` | Labelled with a value the DaemonSets do not match | `kubectl label node <n> --overwrite node-role.kubernetes.io/network=` |
+| `ovn.kubernetes.io/external-gw=true missing on a network node` | The operator's node labelling did not apply it | Check the operator logs; meanwhile `kubectl label node <n> ovn.kubernetes.io/external-gw=true` |
+| `kmetal.io/ovn=true missing on a network node` | The kMetal 1.0.1 operator no longer sets it, but the kmetal-networking agent DaemonSet selects it: the agent runs nowhere and tenant workers never join | `kubectl label node <worker> kmetal.io/ovn=true` on every network node |
+| `kmetal-networking agent … is scheduled on no node` | No node matches the agent's nodeSelector | Label the network nodes as the message shows |
+| `kube-ovn/role=master missing on a central node` | The operator's node labelling did not apply it | Check the operator logs and the `centralNodes` names |
+| `control plane labelled node-role.kubernetes.io/network` (WARN) | Kube-OVN per-node components scheduled on a control plane without overlay | `kubectl label node <n> node-role.kubernetes.io/network-` |
 | `worker listed in centralNodes` (WARN) | ovn-central placed on workers | Prefer the three control planes in `centralNodes` |
 | `N central node(s): fill centralNodes to three` (WARN) | Raft cannot tolerate a failure | List three nodes |
 | `provider … interface … missing` | That network node lacks the NIC/VLAN | Configure it, or add the node to `excludeNodes` |

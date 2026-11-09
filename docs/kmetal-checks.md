@@ -46,7 +46,7 @@ Namespaces used: `kmetal-operator-system`, `kmetal-flux`, `kmetal-metallb`, `sys
 
 | Check | How | Severity |
 |---|---|---|
-| Installation | Helm release `kmetal-operator` in `kmetal-operator-system` with status `deployed`. If it is absent, a Flux HelmRelease in `kmetal-flux` (matched by name, `releaseName` or chart name) is accepted: GitOps install | PASS if either is found; FAIL if neither is |
+| Installation | `helm list` (every release state) in `kmetal-operator-system`, then in `kmetal-flux`: the first release named `kmetal-operator`, named `<namespace>-kmetal-operator` (the name Flux's helm-controller gives it), or installing the `kmetal-operator` chart. Its status must be `deployed`; the operator pods are then looked for in the release's namespace. If no release is visible, a Flux HelmRelease object in `kmetal-flux` (matched by name, `releaseName` or chart name) is accepted: GitOps install | PASS if a deployed release or a HelmRelease is found; FAIL if the release is not `deployed`, or if nothing is found |
 | Version | The chart version, from Helm or from the HelmRelease history, is `1.0.x` | WARN otherwise |
 | Operator pods | Every pod in the release's target namespace is Running with all containers ready, or Succeeded | FAIL |
 | Flux objects | Every HelmRelease, Kustomization and OCIRepository in `kmetal-flux` has `Ready=True`; failing ones are listed with their message | FAIL |
@@ -71,10 +71,11 @@ Namespaces used: `kmetal-operator-system`, `kmetal-flux`, `kmetal-metallb`, `sys
 | Classes distinct | the two names differ: tenant quotas count by class name | WARN |
 | Classes exist | each named class, including `etcdClassName` when set, exists; provisioner, binding mode and expansion are shown | FAIL |
 | Expansion | `allowVolumeExpansion: true` on the platform and tenant classes | WARN |
-| Snapshot class | `clusterClass.values.dataVolume.volumeSnapshotClass` exists, and its driver equals the platform class's provisioner. When unset, a class of that driver is searched for (default class first) | FAIL: golden images cannot be snapshotted and no tenant machine boots |
-| CDI profile | the platform class's StorageProfile has a non-empty `status.snapshotClass`; its `cloneStrategy` is shown | FAIL |
+| Snapshot class | Required for `underclusterClassName` only; the tenant and etcd classes need none. The class serving it is the one named in `clusterClass.values.dataVolume.volumeSnapshotClass` when that exists on the platform class's driver, else the driver's default VolumeSnapshotClass, else any class of that driver | FAIL when none serves the platform class: golden images cannot be snapshotted and no tenant machine boots |
+| Snapshot class named in the spec | `clusterClass.values.dataVolume.volumeSnapshotClass`, when set, exists and uses the platform class's driver | FAIL, naming the class that does serve the platform class; the snapshot test still runs with that one |
+| CDI profile | the `underclusterClassName` StorageProfile has a non-empty `status.snapshotClass`; its `cloneStrategy` is shown | FAIL when empty; WARN when it names a class other than the one serving the platform class |
 | Write/read per class | 1 Gi PVC plus a pod that writes, syncs and reads a file; it must finish within 300 s | FAIL, with pod logs, events and PVC events |
-| Snapshot | a `VolumeSnapshot` of the platform-class PVC is `readyToUse` within 300 s | FAIL |
+| Snapshot | a `VolumeSnapshot` of the platform-class PVC, with the class serving it, is `readyToUse` within 300 s | FAIL |
 | Restore | a PVC restored from that snapshot must contain the data and **accept writes** | FAIL when the StorageProfile clones by `snapshot` (tenant root disks would fail); WARN otherwise |
 
 Each test pod runs where the real consumer of its class runs:
@@ -94,18 +95,21 @@ Checks the node labels and the Kube-OVN central nodes described in
 | MetalLB exclusion label | no control plane carries `node.kubernetes.io/exclude-from-external-load-balancers` (kubeadm sets it); the MetalLB speakers must announce from the control planes | FAIL, with the `kubectl label … -` fix |
 | Compute nodes | at least one node has `node-role.kubernetes.io/compute` | FAIL |
 | virt-handler | a Ready `virt-handler` pod (`system-kubevirt`) on every compute node | FAIL |
-| Network nodes | at least one node has `kmetal.io/ovn` | FAIL |
-| Label on control plane | a control plane carries `kmetal.io/ovn` | WARN, with the `kubectl label … kmetal.io/ovn-` fix |
-| Gateway label | every network node has `ovn.kubernetes.io/external-gw=true` | FAIL |
+| Network nodes | at least one node has `node-role.kubernetes.io/network`, the label Kube-OVN's DaemonSets select on (normally the workers) | FAIL |
+| Network label value | the value is empty; `=true` does not match the DaemonSets | FAIL, with the `--overwrite …=` fix |
+| Label on control plane | a control plane carries `node-role.kubernetes.io/network` | WARN, with the `kubectl label … -` fix |
+| Gateway label | every network node has `ovn.kubernetes.io/external-gw=true` (set by the operator) | FAIL |
+| Networking agent label | every network node carries the labels of the kmetal-networking agent DaemonSet's `nodeSelector` (found by `app.kubernetes.io/name=kmetal-networking`, `component=agent`), today `kmetal.io/ovn=true`; `kmetal.io/ovn=true` is assumed when the DaemonSet is not found | FAIL, with the `kubectl label` fix: tenant workers never join without the agent |
+| Networking agent | a Ready agent pod on every network node; the DaemonSet is scheduled on at least one node | FAIL |
+| `kmetal.io/ovn` on a control plane | | WARN |
 | kube-ovn-cni | a Ready `app=kube-ovn-cni` pod on every network node | FAIL |
 | Tunnel interface | with `setup.env`: `ip link show dev <tunnelInterface>` succeeds on every network node | FAIL |
 | Central nodes listed | `centralNodes` is not empty and each entry is a node | FAIL |
-| Central label | each central node has `kube-ovn/role=master` | FAIL |
+| Central label | each central node has `kube-ovn/role=master` (set by the operator) | FAIL |
 | Worker as central | a central node that is not a control plane | WARN |
 | Unused control planes | three or more control planes exist but fewer than three are central | WARN |
 | Raft size | fewer than three central nodes, or an even number | WARN; PASS shows how many losses Raft tolerates |
 | Stray master label | `kube-ovn/role=master` on a node outside `centralNodes` | WARN |
-| Legacy label | `node-role.kubernetes.io/network` present | INFO |
 
 ### providers
 
@@ -119,7 +123,7 @@ How it is performed:
 2. **Validate subnets.** Check each subnet's CIDR, gateway and `excludeIPs`, and check for
    overlaps against pod, service, join, node and the other provider networks, using the
    tool's own IP arithmetic.
-3. **List target nodes.** Compute the network nodes (`kmetal.io/ovn`) that are not in
+3. **List target nodes.** Compute the network nodes (`node-role.kubernetes.io/network`) that are not in
    `excludeNodes`.
 4. **Inspect each target node over SSH** (only with `setup.env`). Run
    `ip -d -j link show dev <if>` and `ip -j -4 addr show dev <if>`, then check: present,

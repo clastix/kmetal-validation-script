@@ -78,5 +78,5 @@ documentation:
 |---|---|---|
 | Worker OS images | Read from `spec.clusterClass.values.osArtifact.tags` | The field path in the `KMetal` resource |
 | `kube-ovn/role=master` | Checked on `spec.networking.kubeOVN.centralNodes`, ideally the three control planes | It is ovn-central's nodeSelector |
-| Overlay on control planes | INFO when absent | Control planes are not network nodes; Kube-OVN's tunnel runs on `kmetal.io/ovn` nodes only |
+| Overlay on control planes | INFO when absent | Control planes are not network nodes; Kube-OVN's tunnel runs on the network nodes (`node-role.kubernetes.io/network`, the workers) only |
 | Minimum size | Fewer than 1 control plane + 2 workers is a FAIL; fewer than 3 control planes is a WARN | The documented production layout has 3 control planes |
