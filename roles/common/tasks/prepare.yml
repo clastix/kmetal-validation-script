@@ -1,0 +1,55 @@
+---
+# Preparation on localhost, first play of every playbook.
+#   kmv_need_env:  true when the playbook needs nodes in the inventory (undercluster)
+#   kmv_need_kube: true when the playbook needs the under cluster API (kmetal, cleanup)
+# Sets: kmv_rid, kmv_have_env, kmv_nodes, kmv_have_kube, kmv_km, kmv_central, kmv_tunnel_type
+
+- name: prepare | run ID
+  ansible.builtin.set_fact:
+    kmv_rid: "{{ (kmv_run_id | string) if (kmv_run_id | string | length > 0) else ('%05d' | format(100000 | random)) }}"
+    kmv_have_env: "{{ groups['kmetal_nodes'] | default([]) | length > 0 }}"
+
+- name: prepare | validate the inventory
+  ansible.builtin.import_tasks: validate.yml
+  when: kmv_need_env | default(false) or kmv_have_env
+
+- name: prepare | Check that the under cluster API answers
+  ansible.builtin.command: kubectl get --raw /readyz --request-timeout=10s
+  register: _kmv_readyz
+  changed_when: false
+  failed_when: false
+
+- name: prepare | Read the KMetal resource, the source of every expected value
+  ansible.builtin.command: kubectl get km -o json --request-timeout=30s
+  register: _kmv_kmget
+  changed_when: false
+  failed_when: false
+  when: _kmv_readyz.rc == 0
+
+- name: prepare | KMetal facts
+  ansible.builtin.set_fact:
+    kmv_have_kube: "{{ _kmv_readyz.rc == 0 }}"
+    kmv_km: >-
+      {{ ((_kmv_kmget.stdout | from_json)['items'] | first | default({}))
+         if (_kmv_kmget.rc | default(1)) == 0 else {} }}
+
+- name: prepare | stop without the under cluster API
+  ansible.builtin.fail:
+    msg: "cannot reach the under cluster API (kubeconfig {{ kmv_kubeconfig }}): {{ _kmv_readyz.stderr | default(_kmv_readyz.msg | default('')) }}"
+  when: kmv_need_kube | default(false) and not kmv_have_kube
+
+- name: prepare | central nodes and tunnel type
+  ansible.builtin.set_fact:
+    kmv_central: >-
+      {{ kmv_central_nodes if kmv_central_nodes | default([], true) | length > 0
+         else (kmv_km.spec.networking.kubeOVN.centralNodes | default([], true)) }}
+    kmv_tunnel_type: "{{ kmv_km.spec.networking.kubeOVN.tunnelType | default('geneve', true) }}"
+
+- name: prepare | run
+  ansible.builtin.debug:
+    msg:
+      - "kmetal-validate {{ kmv_version }} for kMetal {{ kmv_target_kmetal }}, run ID {{ kmv_rid }}"
+      - "inventory: {{ (kmv_nodes | default([]) | length) ~ ' nodes' if kmv_have_env else 'no nodes' }}"
+      - "under cluster API: {{ 'reachable (' ~ kmv_kubeconfig ~ ')' if kmv_have_kube else 'not reachable' }}; KMetal resource: {{ kmv_km.metadata.name | default('none') }}"
+      - "Kube-OVN central nodes: {{ kmv_central | join(' ') if kmv_central | length > 0 else 'unknown' }}"
+      - "Leftovers of an interrupted run: ansible-playbook -i <inventory> playbooks/cleanup.yml -e kmv_run_id={{ kmv_rid }}"

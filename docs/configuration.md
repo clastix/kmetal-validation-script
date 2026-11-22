@@ -1,42 +1,85 @@
-# Configuration: `setup.env`
+# Configuration: the inventory
 
 [← Index](README.md)
 
-`setup.env` describes the under cluster as the customer intends it: nodes, roles, networks,
-VLANs and addresses. The `undercluster` checks compare the real nodes against it. `kmetal` uses
-it optionally, for the checks that need SSH.
+The **inventory** describes the under cluster as the customer intends it: nodes, roles,
+networks, VLANs and addresses. `undercluster.yml` compares the real nodes against it.
+`kmetal.yml` uses it optionally, for the checks that need SSH.
 
-The file is **sourced by bash**: it is plain variable assignments plus associative arrays. Load a
-different file with `-e FILE`; the default is `./setup.env`.
+An inventory is a directory, selected with `-i`:
 
-## Keys
+```
+inventory/<site>/
+  hosts.yml                      nodes, grouped by role, with their addresses
+  group_vars/all.yml             networks, provider networks, probes, end-to-end settings
+  group_vars/kmetal_nodes.yml    how to reach the nodes (ansible_host from the mgmt address)
+```
+
+`inventory/example/` is a complete example to copy. Every variable has a default in
+`roles/common/defaults/main.yml`; the inventory overrides it, and `-e name=value` overrides
+both. See the [Ansible primer](ansible-primer.md#variables-and-their-precedence).
+
+## Nodes: `hosts.yml`
+
+```yaml
+all:
+  vars:
+    ansible_user: ubuntu                 # SSH user; needs passwordless sudo
+  children:
+    kmetal_nodes:
+      children:
+        control_plane:
+          hosts:
+            cp-01:
+              kmv_addresses: {mgmt: 192.0.2.10, tenant: 198.51.100.10}
+        workers:
+          hosts:
+            worker-01:
+              kmv_addresses: {mgmt: 192.0.2.13, tenant: 198.51.100.13, overlay: 198.51.100.40}
+```
+
+- Every node is in **exactly one** of `control_plane` and `workers`, both inside
+  `kmetal_nodes`. The group is the node's role.
+- `kmv_addresses` maps a network name of `kmv_networks` to the node's address on it.
+  - An address may carry a prefix (`10.0.0.5/24`). Without one, the prefix of the network's
+    `cidr` is expected on the interface.
+  - A network missing from `kmv_addresses` means the node is not on it (e.g. no overlay on a
+    control plane).
+  - `mgmt` is required on every node: it is the SSH target.
+- The host name is the node name, compared with the Kubernetes node names.
+- The number of control planes and workers is the size of each group.
 
 ### SSH
 
-| Key | Default | Meaning |
+| Variable | Default | Meaning |
 |---|---|---|
-| `SSH_USER` | `ubuntu` | User on every node; it connects to the node's `mgmt` address |
-| `SSH_OPTS` | `-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new` | Extra `ssh` options, e.g. `-J user@bastion` or `-i key` |
-| `SSH_SUDO` | `sudo -n` | Prefix for commands that need root; `""` when `SSH_USER` is root |
+| `ansible_user` | your local user | User on every node; it connects to `ansible_host` |
+| `ansible_host` | set from `kmv_addresses.mgmt` in `group_vars/kmetal_nodes.yml` | Address Ansible connects to |
+| `ansible_ssh_common_args` | none | Extra `ssh` options, e.g. `-J user@bastion` for a jump host |
+| `ansible_ssh_private_key_file` | your SSH agent / default key | Key to use |
 
-### Size
+`ansible.cfg` already sets `BatchMode=yes`, `ConnectTimeout=5` and
+`StrictHostKeyChecking=accept-new`. Root is obtained with `sudo -n` (`become`); with
+`ansible_user: root` no sudo is needed.
 
-| Key | Meaning |
+## Networks carrying a node address
+
+```yaml
+kmv_networks:
+  mgmt:    {interface: bond0.100, vlan: 100, cidr: 192.0.2.0/25}
+  tenant:  {interface: bond0.200, vlan: 200, cidr: 198.51.100.0/27}
+  overlay: {interface: bond0.300, vlan: 300, cidr: 198.51.100.32/27, mtu: 9000}
+```
+
+| Variable | Meaning |
 |---|---|
-| `CP_COUNT` | Expected number of control planes; must equal the `cp` rows in `NODES` (optional) |
-| `WORKER_COUNT` | Expected number of workers; must equal the `worker` rows in `NODES` (optional) |
-
-### Networks carrying a node address
-
-| Key | Meaning |
-|---|---|
-| `NETWORKS` | Space-separated network names. `mgmt`, `tenant` and `overlay` are mandatory; others (e.g. `storage`) are allowed. **The address columns of `NODES` follow this order.** |
-| `NET_IFACE[net]` | Interface name on the nodes: a VLAN sub-interface (`bond0.104`), a bond or a NIC |
-| `NET_VLAN[net]` | VLAN ID the interface must carry. Empty or `0`: the interface is not a VLAN device, and the ID is not checked |
-| `NET_CIDR[net]` | The network, as a canonical CIDR (network address, not a host address) |
-| `NET_MTU[net]` | Optional expected MTU. Above 1500, a do-not-fragment ping checks it end to end |
-| `NET_INTERNET` | The only network allowed to reach the internet (default `mgmt`) |
-| `OPTIONAL_NETWORKS` | Networks whose absence is a WARN or INFO, not a FAIL (e.g. a storage VLAN) |
+| `kmv_networks` | One entry per network. `mgmt`, `tenant` and `overlay` are mandatory; others (e.g. `storage`) are allowed. The order is the order of the checks and of the node table |
+| `.interface` | Interface name on the nodes: a VLAN sub-interface (`bond0.104`), a bond or a NIC |
+| `.vlan` | VLAN ID the interface must carry. Absent or `0`: the interface is not a VLAN device, and the ID is not checked |
+| `.cidr` | The network, as a canonical CIDR (network address, not a host address) |
+| `.mtu` | Optional expected MTU. Above 1500, a do-not-fragment ping checks it end to end |
+| `kmv_internet_network` | The only network allowed to reach the internet (default `mgmt`) |
+| `kmv_optional_networks` | Networks whose absence is a WARN or INFO, not a FAIL (e.g. `[storage]`) |
 
 The network names have a meaning to the checks:
 
@@ -44,156 +87,164 @@ The network names have a meaning to the checks:
 |---|---|
 | `mgmt` | SSH target, internet egress, the `loadBalancer.management` MetalLB range |
 | `tenant` | The `loadBalancer.tenantControlPlanes` MetalLB range |
-| `overlay` | The Kube-OVN tunnel; required on workers, optional on control planes |
+| `overlay` | The Kube-OVN tunnel; required on workers, not needed on control planes |
 
-### Provider networks
+## Provider networks
 
 Provider networks carry tenant egress and EIPs. They exist on **workers only** and their
 interface carries **no IP address**. Declare the default ones here; additional ones created by
-the platform are found in the `KMetal` resource (see [Topology model](topology-model.md#provider-networks)).
+the platform are found in the `KMetal` resource (see
+[Topology model](topology-model.md#provider-networks)).
 
-| Key | Meaning |
-|---|---|
-| `PROVIDER_NETWORKS` | Space-separated names, one or more |
-| `PROV_IFACE[name]` | Interface name on the workers |
-| `PROV_VLAN[name]` | Expected VLAN ID; empty or `0` when not a VLAN device |
-
-### Nodes
-
-`NODES` is a multi-line table, one row per node:
-
-```
-name   role   <one address per NETWORKS entry>
+```yaml
+kmv_provider_networks:
+  provider: {interface: bond0.500, vlan: 500}
 ```
 
-- `role` is `cp` or `worker`.
-- An address may carry a prefix (`10.0.0.5/24`). Without one, the prefix of `NET_CIDR` is
-  expected on the interface.
-- `-` means the node has no address on that network (e.g. no overlay on a control plane).
-- `#` starts a comment; blank lines are ignored.
-- The `mgmt` column is required on every node: it is the SSH target.
-
-### Kube-OVN central nodes
-
-| Key | Meaning |
+| Variable | Meaning |
 |---|---|
-| `CENTRAL_NODES` | Space-separated node names. Read from `spec.networking.kubeOVN.centralNodes` when a kubeconfig works; set it here only to describe a cluster where kMetal is not yet installed. `undercluster` uses it for context messages |
+| `kmv_provider_networks` | One entry per provider network, keyed by name |
+| `.interface` | Interface name on the workers |
+| `.vlan` | Expected VLAN ID; absent or `0` when not a VLAN device |
 
-### Probes
+## Kube-OVN central nodes
 
-| Key | Default | Meaning |
+| Variable | Meaning |
+|---|---|
+| `kmv_central_nodes` | List of node names. Read from `spec.networking.kubeOVN.centralNodes` when a kubeconfig works; set it only to describe a cluster where kMetal is not yet installed. `undercluster.yml` uses it for context messages |
+
+## Probes
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `INTERNET_PROBE_URL` | `https://ghcr.io` | URL fetched to prove internet egress (nodes and tenant pods) |
-| `INTERNET_PROBE_IP` | `1.1.1.1` | Address pinged per network |
-| `DNS_PROBE` | `ghcr.io` | Name resolved on every node |
-| `ENCAP_TEST_PORT` | `6090` | UDP port of the temporary test tunnel (Geneve); VXLAN uses the next port. Kept away from Kube-OVN's own `6081` |
+| `kmv_internet_probe_url` | `https://ghcr.io` | URL fetched to prove internet egress (nodes and tenant pods) |
+| `kmv_internet_probe_ip` | `1.1.1.1` | Address pinged per network |
+| `kmv_dns_probe` | `ghcr.io` | Name resolved on every node |
+| `kmv_encap_test_port` | `6090` | UDP port of the temporary test tunnel (Geneve); VXLAN uses the next port. Kept away from Kube-OVN's own `6081` |
 
-### End-to-end test
+## End-to-end tests
 
-| Key | Default | Meaning |
+| Variable | Default | Meaning |
 |---|---|---|
-| `E2E_SUBNET_CIDR` | `10.250.0.0/24` | Subnet given to **every** test environment, in both scenarios; the overlap is intentional |
-| `E2E_CLUSTERCLASS` | auto | ClusterClass to use. Auto: `kubevirt-standard`, then `kubevirt-expert`, then `kubevirt-kubeadm`, then the first one found |
-| `E2E_K8S_VERSION` | auto | Kubernetes version; must be one of `osArtifact.tags`. Auto: the first tag |
-| `E2E_MACHINE_SIZE` | `small` | `machineSize` variable |
-| `E2E_DATASTORE` | `default` | `controlPlane.dataStoreName` variable |
-| `E2E_WORKERS_A` / `E2E_WORKERS_B` | `2` / `1` | Workers in the two clusters of the `e2e` scenario (one tenant, two environments) |
-| `E2E_TENANT1_WORKERS` / `E2E_TENANT2_WORKERS` | `1` / `2` | Workers in the two clusters of the `e2e-tenants` scenario (two tenants). Different counts let the isolation probe find an address used by only one tenant |
-| `E2E_POD_CIDR` / `E2E_SVC_CIDR` | `10.93.0.0/16` / `10.96.0.0/16` | Tenant cluster networks |
-| `TEST_IMAGE` | `nginx:alpine` | HTTP backend pods |
-| `PROBE_IMAGE` | `busybox:1.36` | Storage writer pods |
-| `CURL_IMAGE` | `curlimages/curl:8.10.1` | Egress and reachability probes |
-| `TENANT_ACCESS` | `auto` | How to reach tenant API servers: `direct`, `ssh` (through a control plane), or `auto` (direct when it answers) |
-| `TENANT_KUBECTL_NODE` | first `cp` | Node that runs tenant `kubectl` in `ssh` mode |
-| `EIP_PROBE_FROM` | `local` | Where an EIP is fetched from: `local` or a node name |
+| `kmv_e2e_subnet_cidr` | `10.250.0.0/24` | Subnet given to **every** test environment, in both scenarios; the overlap is intentional |
+| `kmv_e2e_clusterclass` | auto | ClusterClass to use. Auto: `kubevirt-standard`, then `kubevirt-expert`, then `kubevirt-kubeadm`, then the first one found |
+| `kmv_e2e_k8s_version` | auto | Kubernetes version; must be one of `osArtifact.tags`. Auto: the first tag |
+| `kmv_e2e_machine_size` | `small` | `machineSize` variable |
+| `kmv_e2e_datastore` | `default` | `controlPlane.dataStoreName` variable |
+| `kmv_e2e_workers_a` / `kmv_e2e_workers_b` | `2` / `1` | Workers in the two clusters of the `e2e` scenario (one tenant, two environments) |
+| `kmv_e2e_tenant1_workers` / `kmv_e2e_tenant2_workers` | `1` / `2` | Workers in the two clusters of the `e2e-tenants` scenario (two tenants). Different counts let the isolation probe find an address used by only one tenant |
+| `kmv_e2e_pod_cidr` / `kmv_e2e_svc_cidr` | `10.93.0.0/16` / `10.96.0.0/16` | Tenant cluster networks |
+| `kmv_test_image` | `nginx:alpine` | HTTP backend pods |
+| `kmv_probe_image` | `busybox:1.36` | Storage writer pods |
+| `kmv_curl_image` | `curlimages/curl:8.10.1` | Egress and reachability probes |
+| `kmv_tenant_access` | `auto` | How to reach tenant API servers: `direct`, `ssh` (through a control plane), or `auto` (direct when it answers) |
+| `kmv_tenant_kubectl_node` | first control plane | Node that runs tenant `kubectl` in `ssh` mode |
+| `kmv_eip_probe_from` | `local` | Where an EIP is fetched from: `local` or a node name |
 
-On air-gapped sites, point the three image keys and `INTERNET_PROBE_URL` at internal mirrors.
+On air-gapped sites, point the three image variables and `kmv_internet_probe_url` at internal
+mirrors.
 
-### Platform names
+## Run options
 
-| Key | Default | Meaning |
+Usually given with `-e` on the command line ([Getting started](getting-started.md#options)).
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `KMETAL_NAMESPACE` | `kmetal-operator-system` | Namespace searched first for the operator's Helm release; `kmetal-flux` is searched next |
-| `KMETAL_RELEASE` | `kmetal-operator` | Helm release, or Flux HelmRelease, name; `<namespace>-KMETAL_RELEASE` also matches |
-| `KMETAL_CHART` | `kmetal-operator` | Chart of the operator; a Helm release installing it matches whatever its name |
+| `kmv_kubeconfig` | `$KUBECONFIG`, else `~/.kube/config` | Under cluster kubeconfig |
+| `kmv_keep` | `false` | Keep the test resources |
+| `kmv_force_e2e` | `false` | Run the end-to-end groups after earlier failures |
+| `kmv_timeout_cluster` | `30m` | Wait for tenant clusters |
+| `kmv_run_id` | random | Run ID; required by `cleanup.yml` |
+
+## Platform names
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `kmv_target_kmetal` | `1.0.1` | kMetal release the rules follow |
+| `kmv_operator_namespace` | `kmetal-operator-system` | Namespace searched first for the operator's Helm release; `kmetal-flux` is searched next |
+| `kmv_operator_release` | `kmetal-operator` | Helm release, or Flux HelmRelease, name; `<namespace>-kmetal-operator` also matches |
+| `kmv_operator_chart` | `kmetal-operator` | Chart of the operator; a Helm release installing it matches whatever its name |
+| `kmv_pool_names` | `tenant-cp-pool`, `mgmt-pool` | MetalLB pool names the operator creates |
+| `kmv_ns_flux`, `kmv_ns_metallb`, `kmv_ns_kubevirt`, `kmv_ns_capi`, `kmv_ns_images` | `kmetal-flux`, `kmetal-metallb`, `system-kubevirt`, `kmetal-capi-providers`, `kmetal-image-builder` | Platform namespaces |
 
 ## Validation
 
-`check-env`, and every command that loads the file, rejects it before contacting anything if:
+`check-env.yml`, and every playbook that uses the inventory, reject it before contacting
+anything if:
 
-- `NETWORKS` lacks `mgmt`, `tenant` or `overlay`;
-- a network has no `NET_IFACE` or `NET_CIDR`, or the CIDR is invalid or not a network address;
-- a `NET_VLAN` is not a number;
-- `NET_INTERNET` is not in `NETWORKS`;
-- a provider network has no `PROV_IFACE`;
-- a `NODES` row has the wrong number of columns, an unknown role, a duplicate name, or no `mgmt`
-  address;
+- `kmv_networks` is empty or lacks `mgmt`, `tenant` or `overlay`;
+- a network has no `interface` or `cidr`, or the CIDR is invalid or not a network address;
+- a `vlan` is not a number;
+- `kmv_internet_network` is not in `kmv_networks`;
+- a provider network has no `interface`;
+- there is no host in `kmetal_nodes`;
+- a node is in both or neither of `control_plane` and `workers`;
+- a `kmv_addresses` key is not a network of `kmv_networks`;
 - an address is not IPv4, falls outside its network, or is used twice;
-- `CP_COUNT` or `WORKER_COUNT` disagree with the table.
+- a node has no `mgmt` address;
+- `kmv_central_nodes` names a node that is not in the inventory.
 
-All errors are listed at once; the exit code is `3`.
+All errors are listed at once and the playbook fails (exit code `2`). Overlapping networks are
+reported by the `addressing` check group of `undercluster.yml`.
 
 ## Template
 
-```bash
-# --- SSH -------------------------------------------------------------------------
-SSH_USER=ubuntu
-SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
-# SSH_OPTS="$SSH_OPTS -J jump@bastion.example"   # through a jump host
-# SSH_SUDO=""                                     # when SSH_USER is root
+`hosts.yml`:
 
-# --- Size ------------------------------------------------------------------------
-# Minimum lab: 1 control plane + 2 workers. Production: 3 control planes + 3 or more workers.
-CP_COUNT=3
-WORKER_COUNT=2
+```yaml
+all:
+  vars:
+    ansible_user: ubuntu
+    # ansible_ssh_common_args: "-J jump@bastion.example"   # through a jump host
+  children:
+    kmetal_nodes:
+      children:
+        control_plane:
+          hosts:
+            cp-01: {kmv_addresses: {mgmt: 192.0.2.10, tenant: 198.51.100.10, storage: 203.0.113.101}}
+            cp-02: {kmv_addresses: {mgmt: 192.0.2.11, tenant: 198.51.100.11, storage: 203.0.113.102}}
+            cp-03: {kmv_addresses: {mgmt: 192.0.2.12, tenant: 198.51.100.12, storage: 203.0.113.103}}
+        workers:
+          hosts:
+            worker-01: {kmv_addresses: {mgmt: 192.0.2.13, tenant: 198.51.100.13, overlay: 198.51.100.40, storage: 203.0.113.104}}
+            worker-02: {kmv_addresses: {mgmt: 192.0.2.14, tenant: 198.51.100.14, overlay: 198.51.100.41, storage: 203.0.113.105}}
+```
 
-# --- Networks carrying a node address ---------------------------------------------
-NETWORKS="mgmt tenant overlay storage"
-NET_IFACE=( [mgmt]=bond0.100 [tenant]=bond0.200 [overlay]=bond0.300 [storage]=bond0.400 )
-NET_VLAN=(  [mgmt]=100 [tenant]=200 [overlay]=300 [storage]=400 )
-NET_CIDR=(  [mgmt]=192.0.2.0/25 [tenant]=198.51.100.0/27 [overlay]=198.51.100.32/27 [storage]=203.0.113.0/24 )
-NET_MTU=(   [overlay]=9000 )
-NET_INTERNET=mgmt
-OPTIONAL_NETWORKS="storage"
+`group_vars/kmetal_nodes.yml`:
 
-# --- Provider networks: workers only, no IP ----------------------------------------
-PROVIDER_NETWORKS="provider"
-PROV_IFACE=( [provider]=bond0.500 )
-PROV_VLAN=(  [provider]=500 )
+```yaml
+ansible_host: "{{ kmv_addresses.mgmt | split('/') | first }}"
+```
 
-# --- Nodes -----------------------------------------------------------------------
-# name        role    mgmt          tenant          overlay         storage
-NODES="
-cp-01         cp      192.0.2.10    198.51.100.10   -               203.0.113.101
-cp-02         cp      192.0.2.11    198.51.100.11   -               203.0.113.102
-cp-03         cp      192.0.2.12    198.51.100.12   -               203.0.113.103
-worker-01     worker  192.0.2.13    198.51.100.13   198.51.100.40   203.0.113.104
-worker-02     worker  192.0.2.14    198.51.100.14   198.51.100.41   203.0.113.105
-"
+`group_vars/all.yml`:
+
+```yaml
+kmv_networks:
+  mgmt:    {interface: bond0.100, vlan: 100, cidr: 192.0.2.0/25}
+  tenant:  {interface: bond0.200, vlan: 200, cidr: 198.51.100.0/27}
+  overlay: {interface: bond0.300, vlan: 300, cidr: 198.51.100.32/27, mtu: 9000}
+  storage: {interface: bond0.400, vlan: 400, cidr: 203.0.113.0/24}
+kmv_internet_network: mgmt
+kmv_optional_networks: [storage]
+
+kmv_provider_networks:
+  provider: {interface: bond0.500, vlan: 500}
 
 # Only before kMetal is installed; otherwise read from the KMetal resource.
-# CENTRAL_NODES="cp-01 cp-02 cp-03"
+# kmv_central_nodes: [cp-01, cp-02, cp-03]
 
-# --- Probes ----------------------------------------------------------------------
-INTERNET_PROBE_URL=https://ghcr.io
-INTERNET_PROBE_IP=1.1.1.1
-DNS_PROBE=ghcr.io
-ENCAP_TEST_PORT=6090
+kmv_internet_probe_url: https://ghcr.io
+kmv_internet_probe_ip: 1.1.1.1
+kmv_dns_probe: ghcr.io
 
-# --- End-to-end test -------------------------------------------------------------
-E2E_SUBNET_CIDR=10.250.0.0/24
-E2E_CLUSTERCLASS=""
-E2E_K8S_VERSION=""
-E2E_MACHINE_SIZE=small
-E2E_WORKERS_A=2
-E2E_WORKERS_B=1
-E2E_TENANT1_WORKERS=1
-E2E_TENANT2_WORKERS=2
-TEST_IMAGE=nginx:alpine
-PROBE_IMAGE=busybox:1.36
-CURL_IMAGE=curlimages/curl:8.10.1
-TENANT_ACCESS=auto
-EIP_PROBE_FROM=local
+kmv_e2e_subnet_cidr: 10.250.0.0/24
+kmv_e2e_clusterclass: ""
+kmv_e2e_k8s_version: ""
+kmv_test_image: nginx:alpine
+kmv_probe_image: busybox:1.36
+kmv_curl_image: curlimages/curl:8.10.1
+kmv_tenant_access: auto
+kmv_eip_probe_from: local
 ```
 
 The addresses use documentation ranges (RFC 5737); replace every one of them.

@@ -1,0 +1,39 @@
+---
+# crds: the CRDs tenants rely on exist; every osArtifact tag has a Ready OSArtifact in
+# kmetal-image-builder whose <name>-golden PVC is Bound.
+
+- name: crds | Read the installed CRDs
+  ansible.builtin.command: kubectl get crd -o jsonpath={.items[*].metadata.name}
+  register: _crd_read
+  changed_when: false
+  failed_when: false
+
+- name: crds | golden images
+  ansible.builtin.import_tasks: resolve_images.yml
+
+- name: crds | verdicts
+  kmv_record:
+    group: crds
+    verdicts: >-
+      {%- set have = _crd_read.stdout | default('') | split -%}
+      {%- set v = [] -%}
+      {%- for c in ['clusters.cluster.x-k8s.io', 'kamajicontrolplanes.controlplane.cluster.x-k8s.io', 'virtualmachines.kubevirt.io',
+                    'vpcclaims.network.kmetal.io', 'subnetclaims.network.kmetal.io', 'eipclaims.network.kmetal.io',
+                    'providernetworks.network.kmetal.io', 'tenants.capsule.clastix.io', 'volumesnapshots.snapshot.storage.k8s.io',
+                    'osartifacts.build.kairos.io'] -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'CRD ' ~ c} if c in have else {'level': 'FAIL', 'msg': 'CRD ' ~ c ~ ' missing'}) -%}
+      {%- endfor -%}
+      {%- if not kmv_tags -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'spec.clusterClass.values.osArtifact.tags is empty: no OS image to boot tenant workers'}) -%}
+      {%- endif -%}
+      {%- for tag in kmv_tags -%}
+      {%-   set a = kmv_artifacts[tag] | default({}) -%}
+      {%-   if not a -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'osArtifact tag ' ~ tag ~ ': no OSArtifact in ' ~ kmv_ns_images}) -%}
+      {%-   elif a.phase == 'Ready' and a.golden == 'Bound' -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'osArtifact tag ' ~ tag ~ ': OSArtifact ' ~ a.name ~ ' Ready, ' ~ a.name ~ '-golden Bound'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'osArtifact tag ' ~ tag ~ ': OSArtifact ' ~ a.name ~ ' ' ~ a.phase ~ ', ' ~ a.name ~ '-golden ' ~ a.golden}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ v }}

@@ -1,0 +1,139 @@
+---
+# storage: the classes of spec.storage exist (platform and tenant classes with different
+# names); only underclusterClassName needs a VolumeSnapshotClass (the one named in
+# clusterClass.values.dataVolume, else its driver's default) and its CDI StorageProfile must
+# name it; per class, a 1 Gi PVC with a write/read pod placed where the
+# real consumer runs; then a snapshot of the platform volume, restored and WRITTEN to.
+
+- name: storage | Read the storage classes, the snapshot classes and the platform class's CDI StorageProfile
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get storageclass -o json
+    - kubectl get volumesnapshotclass -o json
+    - kubectl get storageprofile {{ kmv_km.spec.storage.underclusterClassName | default('none', true) }} -o json
+    # to explain an empty StorageProfile snapshotClass: CDI watches VolumeSnapshotClasses only
+    # when the snapshot CRDs existed at its start
+    - kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io -o jsonpath={.metadata.creationTimestamp}
+    - kubectl get pods -A -l app=containerized-data-importer -o json
+  register: _st_read
+  changed_when: false
+  failed_when: false
+
+- name: storage | evaluate the configuration
+  ansible.builtin.set_fact:
+    _st: >-
+      {%- set s = kmv_km.spec.storage | default({}, true) -%}
+      {%- set uc, tc, ec = s.underclusterClassName | default(''), s.tenantClassName | default(''), s.etcdClassName | default('') -%}
+      {%- set classes = {} -%}
+      {%- for c in ((_st_read.results[0].stdout | from_json)['items'] if _st_read.results[0].rc == 0 else []) -%}{%- set _ = classes.update({c.metadata.name: c}) -%}{%- endfor -%}
+      {%- set vscs = (_st_read.results[1].stdout | from_json)['items'] if _st_read.results[1].rc == 0 else [] -%}
+      {%- set sp = (_st_read.results[2].stdout | from_json) if _st_read.results[2].rc == 0 else {} -%}
+      {%- set v = [] -%}
+      {%- if not uc -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'spec.storage.underclusterClassName is not set'}) -%}{%- endif -%}
+      {%- if not tc -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'spec.storage.tenantClassName is not set'}) -%}{%- endif -%}
+      {%- if uc and tc and uc == tc -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': 'underclusterClassName and tenantClassName are both ' ~ uc ~ ': tenant storage quota counts by class name, use two names'}) -%}
+      {%- endif -%}
+      {%- if not ec -%}{%- set _ = v.append({'level': 'INFO', 'msg': 'etcdClassName not set: Kamaji etcd uses ' ~ uc}) -%}{%- endif -%}
+      {%- set roles = {} -%}
+      {%- for r, c in [['uc', uc], ['tenant', tc], ['etcd', ec]] if c -%}
+      {%-   if c not in classes -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'StorageClass ' ~ c ~ ' (' ~ r ~ ') does not exist'}) -%}
+      {%-   else -%}
+      {%-     set j = classes[c] -%}
+      {%-     set _ = roles.update({r: c}) -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'StorageClass ' ~ c ~ ' (' ~ r ~ '): ' ~ j.provisioner ~ ', ' ~ j.volumeBindingMode | default('Immediate')
+                                ~ ', expansion ' ~ (j.allowVolumeExpansion | default(false) | string | lower)}) -%}
+      {%-     if r != 'etcd' and not (j.allowVolumeExpansion | default(false)) -%}
+      {%-       set _ = v.append({'level': 'WARN', 'msg': 'StorageClass ' ~ c ~ ' does not allow volume expansion'}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set ns = namespace(vsc='', clone='') -%}
+      {%- if 'uc' in roles -%}
+      {%-   set prov = classes[uc].provisioner -%}
+      {#- The VolumeSnapshotClass serving underclusterClassName: the one named in
+          clusterClass.values.dataVolume when it exists on that class's driver, else the driver's
+          default class, else any class of that driver. Only this class needs one. -#}
+      {%-   set want = kmv_km.spec.clusterClass['values'].dataVolume.volumeSnapshotClass | default('', true) -%}
+      {%-   set same = vscs | selectattr('driver', 'eq', prov) | list -%}
+      {%-   set dflt = [] -%}
+      {%-   for c in same if (c.metadata.annotations | default({}, true))['snapshot.storage.kubernetes.io/is-default-class'] | default('') == 'true' -%}
+      {%-     set _ = dflt.append(c) -%}
+      {%-   endfor -%}
+      {%-   set pick = ((same | selectattr('metadata.name', 'eq', want) | list) + dflt + same) | first | default({}) -%}
+      {%-   set ns.vsc = pick.metadata.name | default('') -%}
+      {%-   if want and want != ns.vsc -%}
+      {%-     set j = vscs | selectattr('metadata.name', 'eq', want) | first | default({}) -%}
+      {%-     set served = ('; ' ~ uc ~ ' is served by ' ~ ns.vsc) if ns.vsc else '' -%}
+      {%-     if not j -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'clusterClass.values.dataVolume.volumeSnapshotClass ' ~ want ~ ' does not exist' ~ served}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'clusterClass.values.dataVolume.volumeSnapshotClass ' ~ want ~ ' uses driver ' ~ j.driver
+                                ~ ', underclusterClassName ' ~ uc ~ ' uses ' ~ prov ~ served}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%-   if ns.vsc -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'VolumeSnapshotClass ' ~ ns.vsc ~ ' serves underclusterClassName ' ~ uc ~ ' (driver ' ~ prov ~ ')'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'no VolumeSnapshotClass for underclusterClassName ' ~ uc ~ ' (driver ' ~ prov ~ '): golden images cannot be snapshotted, no tenant machine boots'}) -%}
+      {%-   endif -%}
+      {%-   set ns.clone = sp.status.cloneStrategy | default('') -%}
+      {%-   set snapc = sp.status.snapshotClass | default('') -%}
+      {%-   if not sp -%}{%- set _ = v.append({'level': 'WARN', 'msg': 'no CDI StorageProfile ' ~ uc}) -%}
+      {%-   elif not snapc -%}
+      {%-     set msg = 'StorageProfile ' ~ uc ~ ' (underclusterClassName) has no snapshotClass' ~ ((' (expected ' ~ ns.vsc ~ ')') if ns.vsc else '') ~ ': tenant machines will not boot' -%}
+      {%-     if ns.vsc -%}
+      {#-       CDI fills status.snapshotClass itself, but watches VolumeSnapshotClasses only when the
+                snapshot CRDs existed when it started: compare the two times -#}
+      {%-       set crd_t = _st_read.results[3].stdout | default('') -%}
+      {%-       set cdi_t = (((_st_read.results[4].stdout | from_json)['items'] if _st_read.results[4].rc == 0 else [])
+                            | selectattr('metadata.name', 'match', 'cdi-deployment') | map(attribute='status.startTime') | min) | default('') -%}
+      {%-       set hb = (sp.status.conditions | default([], true) | map(attribute='lastHeartbeatTime') | max) | default('unknown') -%}
+      {%-       set msg = msg ~ '. ' ~ ns.vsc ~ ' exists, so CDI has not refreshed this profile (last reconcile ' ~ hb ~ ')'
+                          ~ (('; the snapshot CRDs (' ~ crd_t ~ ') were installed after the CDI controller started (' ~ cdi_t ~ '): it does not watch VolumeSnapshotClasses')
+                             if crd_t and cdi_t and crd_t > cdi_t else '')
+                          ~ '. Fix: kubectl rollout restart deployment/cdi-deployment -n <cdi namespace>, or set spec.snapshotClass: ' ~ ns.vsc ~ ' on the StorageProfile' -%}
+      {%-     endif -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': msg}) -%}
+      {%-   elif ns.vsc and snapc != ns.vsc -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'StorageProfile ' ~ uc ~ ' names snapshotClass ' ~ snapc ~ ', the class serving underclusterClassName is ' ~ ns.vsc}) -%}
+      {%-   else -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'StorageProfile ' ~ uc ~ ' (underclusterClassName): cloneStrategy ' ~ (ns.clone or 'default') ~ ', snapshotClass ' ~ snapc}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ {'verdicts': v, 'roles': roles, 'vsc': ns.vsc, 'clone': ns.clone, 'uc': uc} }}
+
+- name: storage | configuration verdicts
+  kmv_record:
+    group: storage
+    verdicts: "{{ _st.verdicts }}"
+
+- name: storage | test namespace
+  ansible.builtin.include_tasks:
+    file: test_ns.yml
+    apply:
+      tags: [storage]
+  vars:
+    _tns_group: storage
+  when: _st.roles | length > 0
+
+- name: storage | PVC and write/read pod per class
+  ansible.builtin.include_tasks:
+    file: storage_smoke.yml
+    apply:
+      tags: [storage]
+  loop: "{{ _st.roles | dict2items }}"
+  loop_control:
+    loop_var: _sc
+    label: "{{ _sc.value }} ({{ _sc.key }})"
+  when: kmv_test_ns is defined
+
+- name: storage | snapshot and restore
+  ansible.builtin.include_tasks:
+    file: storage_snapshot.yml
+    apply:
+      tags: [storage]
+  when:
+    - kmv_test_ns is defined
+    - "'uc' in _st.roles and _st.vsc | length > 0"
+    - (_st_smoke_ok | default({})).uc | default(false)

@@ -1,0 +1,61 @@
+---
+# mesh: every node pings every peer address on each network both have, bound to that
+# network's interface (all nodes in parallel). Above MTU 1500, a do-not-fragment ping of
+# MTU-28 bytes checks jumbo frames.
+
+- name: mesh | probes to run on this node
+  ansible.builtin.set_fact:
+    _uc_mesh_probes: >-
+      {%- set out = [] -%}
+      {%- for net, cfg in kmv_networks.items() if net in kmv_addresses -%}
+      {%-   for p in ansible_play_hosts if p != inventory_hostname and hostvars[p].kmv_n is defined
+                                       and net in hostvars[p].kmv_addresses | default({}) -%}
+      {%-     set peer = hostvars[p].kmv_addresses[net] | kmv_ip -%}
+      {%-     set _ = out.append({'kind': 'mesh', 'net': net, 'iface': cfg.interface, 'peer': peer}) -%}
+      {%-     if cfg.mtu | default(0, true) | int > 1500 -%}
+      {%-       set _ = out.append({'kind': 'jumbo', 'net': net, 'iface': cfg.interface, 'peer': peer, 'size': cfg.mtu | int - 28}) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: mesh | Ping every peer address on each shared network (plus a jumbo frame when MTU > 1500)  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
+  ansible.builtin.shell: |
+    {% for p in _uc_mesh_probes %}
+    {% if p.kind == 'mesh' %}
+    out=$(ping -c3 -i0.2 -W1 -q -I {{ p.iface | quote }} {{ p.peer | quote }} 2>&1); echo "mesh {{ p.net }} {{ p.peer }} $(echo "$out" | tr '\n' ' ')"
+    {% else %}
+    if ping -c2 -i0.2 -W1 -q -M do -s {{ p.size }} -I {{ p.iface | quote }} {{ p.peer | quote }} >/dev/null 2>&1; then echo "jumbo {{ p.net }} {{ p.peer }} ok"; else echo "jumbo {{ p.net }} {{ p.peer }} fail"; fi
+    {% endif %}
+    {% endfor %}
+    exit 0
+  args:
+    executable: /bin/bash
+  register: _uc_mesh
+  changed_when: false
+  when: _uc_mesh_probes | length > 0
+
+- name: mesh | verdicts
+  kmv_record:
+    group: mesh
+    verdicts: >-
+      {%- set n = inventory_hostname -%}
+      {%- set v = [] -%}
+      {%- set ns = namespace(ok=0) -%}
+      {%- for line in _uc_mesh.stdout_lines | default([]) -%}
+      {%-   set w = line.split(' ', 3) -%}
+      {%-   set kind, net, peer = w[0], w[1], w[2] -%}
+      {%-   if kind == 'mesh' -%}
+      {%-     set loss = (w[3] | default('')) | kmv_ping_loss -%}
+      {%-     if loss | float == 0 -%}{%- set ns.ok = ns.ok + 1 -%}
+      {%-     elif loss | float >= 100 -%}{%- set _ = v.append({'level': 'FAIL', 'msg': n ~ ' -> ' ~ peer ~ ' on ' ~ net ~ ' (' ~ kmv_networks[net].interface ~ '): unreachable'}) -%}
+      {%-     else -%}{%- set _ = v.append({'level': 'WARN', 'msg': n ~ ' -> ' ~ peer ~ ' on ' ~ net ~ ': ' ~ loss ~ '% packet loss'}) -%}
+      {%-     endif -%}
+      {%-   elif kind == 'jumbo' and w[3] | default('') != 'ok' -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': n ~ ' -> ' ~ peer ~ ' on ' ~ net ~ ': MTU ' ~ kmv_networks[net].mtu
+                                ~ ' does not pass end to end (ping -M do -s ' ~ (kmv_networks[net].mtu | int - 28) ~ ')'}) -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- if ns.ok > 0 -%}{%- set _ = v.insert(0, {'level': 'PASS', 'msg': n ~ ': ' ~ ns.ok ~ ' peer addresses reachable without loss'}) -%}{%- endif -%}
+      {%- if _uc_mesh_probes | length == 0 -%}{%- set _ = v.append({'level': 'INFO', 'msg': n ~ ': no reachable peer shares a network with this node'}) -%}{%- endif -%}
+      {{ v }}

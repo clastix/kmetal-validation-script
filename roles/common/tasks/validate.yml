@@ -1,0 +1,89 @@
+---
+# Validate the inventory before anything runs (the port of load_env). Runs on localhost and
+# contacts nothing. Builds kmv_nodes, the node list every later step uses:
+#   [{name, role: cp|worker, addr: {network: "ip[/len]"}}]
+
+- name: validate | build the node list from the inventory
+  ansible.builtin.set_fact:
+    kmv_nodes: >-
+      {%- set out = [] -%}
+      {%- for n in groups['kmetal_nodes'] | default([]) -%}
+      {%-   set _ = out.append({
+              'name': n,
+              'role': 'cp' if n in (groups['control_plane'] | default([])) else 'worker',
+              'in_cp': n in (groups['control_plane'] | default([])),
+              'in_workers': n in (groups['workers'] | default([])),
+              'addr': hostvars[n].kmv_addresses | default({}, true)}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: validate | check networks, providers and nodes
+  ansible.builtin.set_fact:
+    _kmv_errors: >-
+      {%- set e = [] -%}
+      {%- set nets = kmv_networks | default({}, true) -%}
+      {%- if nets | length == 0 -%}{%- set _ = e.append('kmv_networks is empty') -%}{%- endif -%}
+      {%- for req in ['mgmt', 'tenant', 'overlay'] if req not in nets -%}
+      {%-   set _ = e.append("kmv_networks must contain '" ~ req ~ "'") -%}
+      {%- endfor -%}
+      {%- for name, net in nets.items() -%}
+      {%-   if not (net.interface | default('')) -%}{%- set _ = e.append('kmv_networks.' ~ name ~ '.interface is not set') -%}{%- endif -%}
+      {%-   if not (net.cidr | default('')) -%}{%- set _ = e.append('kmv_networks.' ~ name ~ '.cidr is not set') -%}
+      {%-   elif not (net.cidr | kmv_valid_cidr) -%}{%- set _ = e.append('kmv_networks.' ~ name ~ '.cidr ' ~ net.cidr ~ ' is not a valid CIDR') -%}
+      {%-   elif not (net.cidr | kmv_cidr_canonical) -%}{%- set _ = e.append('kmv_networks.' ~ name ~ '.cidr ' ~ net.cidr ~ ' is not a network address') -%}
+      {%-   endif -%}
+      {%-   if (net.vlan | default(0, true) | string) is not match('^[0-9]+$') -%}{%- set _ = e.append('kmv_networks.' ~ name ~ '.vlan ' ~ net.vlan ~ ' is not a number') -%}{%- endif -%}
+      {%- endfor -%}
+      {%- if kmv_internet_network not in nets -%}{%- set _ = e.append('kmv_internet_network ' ~ kmv_internet_network ~ ' is not in kmv_networks') -%}{%- endif -%}
+      {%- for name, p in (kmv_provider_networks | default({}, true)).items() if not (p.interface | default('')) -%}
+      {%-   set _ = e.append('kmv_provider_networks.' ~ name ~ '.interface is not set') -%}
+      {%- endfor -%}
+      {%- if kmv_nodes | length == 0 -%}{%- set _ = e.append('the inventory has no host in group kmetal_nodes') -%}{%- endif -%}
+      {%- set seen = [] -%}
+      {%- for n in kmv_nodes -%}
+      {%-   if n.in_cp and n.in_workers -%}{%- set _ = e.append('node ' ~ n.name ~ ' is in both control_plane and workers') -%}
+      {%-   elif not n.in_cp and not n.in_workers -%}{%- set _ = e.append('node ' ~ n.name ~ ' is in neither control_plane nor workers') -%}
+      {%-   endif -%}
+      {%-   for net, v in n.addr.items() -%}
+      {%-     set ip = v | kmv_ip -%}
+      {%-     if net not in nets -%}{%- set _ = e.append('node ' ~ n.name ~ ': kmv_addresses.' ~ net ~ ' is not a network of kmv_networks') -%}
+      {%-     elif not (ip | kmv_valid_ip) -%}{%- set _ = e.append('node ' ~ n.name ~ ': ' ~ net ~ " address '" ~ v ~ "' is not an IPv4 address") -%}
+      {%-     else -%}
+      {%-       if (nets[net].cidr | default('') | kmv_valid_cidr) and not (nets[net].cidr | kmv_contains(ip)) -%}
+      {%-         set _ = e.append('node ' ~ n.name ~ ': ' ~ net ~ ' address ' ~ ip ~ ' is outside ' ~ nets[net].cidr) -%}
+      {%-       endif -%}
+      {%-       if ip in seen -%}{%- set _ = e.append('address ' ~ ip ~ ' is used twice') -%}{%- endif -%}
+      {%-       set _ = seen.append(ip) -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%-   if 'mgmt' not in n.addr -%}{%- set _ = e.append('node ' ~ n.name ~ ': a mgmt address is required (SSH target)') -%}{%- endif -%}
+      {%- endfor -%}
+      {%- for c in kmv_central_nodes | default([], true) if c not in (kmv_nodes | map(attribute='name')) -%}
+      {%-   set _ = e.append('kmv_central_nodes: ' ~ c ~ ' is not a node of the inventory') -%}
+      {%- endfor -%}
+      {{ e }}
+
+- name: validate | stop on an invalid inventory
+  ansible.builtin.fail:
+    msg: "{{ ['The inventory is invalid:'] + (_kmv_errors | map('regex_replace', '^', '  - ') | list) }}"
+  when: _kmv_errors | length > 0
+
+- name: validate | node table
+  ansible.builtin.debug:
+    msg: >-
+      {%- set nets = kmv_networks -%}
+      {%- set head = ['%-20s %-7s' | format('NODE', 'ROLE')] -%}
+      {%- for name, net in nets.items() -%}{%- set _ = head.append(' %-18s' | format(name ~ '(' ~ net.interface ~ ')')) -%}{%- endfor -%}
+      {%- set out = [head | join('') | trim] -%}
+      {%- for n in kmv_nodes -%}
+      {%-   set row = ['%-20s %-7s' | format(n.name, n.role)] -%}
+      {%-   for name in nets -%}{%- set _ = row.append(' %-18s' | format(n.addr[name] | default('-'))) -%}{%- endfor -%}
+      {%-   set _ = out.append(row | join('') | trim) -%}
+      {%- endfor -%}
+      {%- for name, net in nets.items() -%}
+      {%-   set _ = out.append('network ' ~ name ~ ': iface ' ~ net.interface ~ ', VLAN ' ~ (net.vlan | default('none', true)) ~ ', CIDR ' ~ net.cidr ~ ((', MTU ' ~ net.mtu) if net.mtu | default('') else '')) -%}
+      {%- endfor -%}
+      {%- for name, p in (kmv_provider_networks | default({}, true)).items() -%}
+      {%-   set _ = out.append('provider ' ~ name ~ ': iface ' ~ p.interface ~ ', VLAN ' ~ (p.vlan | default('none', true)) ~ ', workers only, no IP') -%}
+      {%- endfor -%}
+      {{ out }}

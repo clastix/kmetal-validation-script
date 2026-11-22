@@ -2,20 +2,20 @@
 
 [← Index](README.md)
 
-This page describes the under cluster layout that the checks expect, following the kMetal 1.0.0
+This page describes the under cluster layout that the checks expect, following the kMetal 1.0.1
 documentation. Each rule names the check that enforces it.
 
 ## Node roles
 
 | Role | Identified by | Hosts |
 |---|---|---|
-| Control plane | `cp` in `setup.env`; `node-role.kubernetes.io/control-plane` in the cluster | The under cluster control plane, platform controllers, ovn-central (the Kube-OVN central nodes), Kamaji tenant control planes and their etcd by default |
+| Control plane | inventory group `control_plane`; `node-role.kubernetes.io/control-plane` in the cluster | The under cluster control plane, platform controllers, ovn-central (the Kube-OVN central nodes), the MetalLB speakers (`spec.placement`), Kamaji tenant control planes and their etcd by default |
 | Compute | `node-role.kubernetes.io/compute` | Tenant VMs (`virt-handler`), image-builder VMs |
-| Network | `node-role.kubernetes.io/network` (empty value); normally the workers | Kube-OVN's per-node components (`kube-ovn-cni`, `ovs-ovn`, `kube-ovn-pinger`), the overlay tunnel, the OVN gateways and provider bridges |
+| Network | `node-role.kubernetes.io/network` with an **empty** value | Kube-OVN's per-node components (`kube-ovn-cni`, `ovs-ovn`, `kube-ovn-pinger`), the overlay tunnel, the OVN gateways and provider bridges |
 
 On small sites, workers are both compute and network nodes.
 
-**Size** (`undercluster` → `topology`):
+**Size** (`undercluster.yml` → `topology`):
 - Fewer than 1 control plane or 2 workers is a FAIL.
 - Fewer than 3 control planes, or an even number, is a WARN.
 
@@ -45,33 +45,35 @@ Rules and the checks that enforce them:
 
 ### Why control planes need no overlay
 
-Kube-OVN's tunnel and per-node components run only where `node-role.kubernetes.io/network` is
-set, and that label
-belongs on network nodes. ovn-central, which runs on the control planes, uses the node's own
-address for OVSDB Raft, not the tunnel. A control plane without an overlay interface is
-therefore the expected layout and reported as INFO.
+Kube-OVN's tunnel and per-node components run only on network nodes
+(`node-role.kubernetes.io/network`), and that label belongs on workers. ovn-central, which runs
+on the control planes, uses the node's own address for OVSDB Raft, not the tunnel. A control
+plane without an overlay interface is therefore the expected layout and reported as INFO. The
+kMetal documentation also asks for the tunnel interface on every central node; the INFO message
+says so when the control plane is a central node.
 
 ## Node labels
 
-The administrator applies the role labels (`compute`, `network`); the kMetal operator derives
-`ovn.kubernetes.io/external-gw`, `kube-ovn/role=master` and the removal of the MetalLB exclusion
-label from them. Checked by `kmetal` → `nodes`.
+kMetal 1.0.1 adds a **node labelling controller** to the operator. The administrator still
+applies the role labels; the operator derives the others. Checked by `kmetal` → `nodes`.
 
-| Label | Where | If missing or misplaced |
-|---|---|---|
-| `node-role.kubernetes.io/compute` | At least one node, normally the workers | FAIL: no tenant machine or image-builder VM can start, while the install still reports healthy |
-| `node-role.kubernetes.io/network=` (empty value) | Network nodes only, normally the workers | FAIL if no node has it, or if its value is not empty (the DaemonSets do not match `=true`). WARN on a control plane |
-| `ovn.kubernetes.io/external-gw=true` | Every network node (set by the operator) | FAIL: VPCs with external access have no gateway |
-| `kmetal.io/ovn=true` (the value the networking agent selects) | Every network node; applied by the administrator | FAIL: the kmetal-networking agent does not run there, and tenant workers never join. WARN on a control plane |
-| `kube-ovn/role=master` | Every node in `spec.networking.kubeOVN.centralNodes` (set by the operator) | FAIL on a central node without it. WARN on a node that has it but is not central |
-| `node.kubernetes.io/exclude-from-external-load-balancers` | **No control plane** (kubeadm sets it by default) | FAIL: MetalLB speakers must announce from the control planes, and this label stops them. Remove it with `kubectl label node <n> node.kubernetes.io/exclude-from-external-load-balancers-` |
+| Label | Set by | Where | If missing or misplaced |
+|---|---|---|---|
+| `node-role.kubernetes.io/compute` | administrator | At least one node, normally the workers | FAIL: no tenant machine or image-builder VM can start, while the install still reports healthy |
+| `node-role.kubernetes.io/network=` (empty value) | administrator | Network nodes only | FAIL if no node has it, or if its value is not empty (`=true` does not match the DaemonSets). WARN on a control plane |
+| `ovn.kubernetes.io/external-gw=true` | operator, on every network node | Every network node | FAIL: the node labelling controller did not apply it; VPCs with external access have no gateway |
+| `kube-ovn/role=master` | operator, from `spec.networking.kubeOVN.centralNodes` | Every central node | FAIL on a central node without it. WARN on a node that has it but is not central |
+| `node.kubernetes.io/exclude-from-external-load-balancers` | kubeadm sets it; the operator **removes** it from control planes | **No control plane** | FAIL: MetalLB speakers must announce from the control planes, and this label stops them. The operator should have removed it |
+| `kmetal.io/ovn=true` (the value the networking agent selects) | administrator; the 1.0.1 operator no longer sets it | Every network node | FAIL: the kmetal-networking agent DaemonSet does not run there, and tenant workers never join their cluster. WARN on a control plane |
 
-`kmetal.io/ovn=true` is **still required on every network node**. The operator no longer
-sets it and Kube-OVN no longer reads it, but the kmetal-networking agent DaemonSet
-(`kmetal-system-kmetal-networking-agent`, chart kmetal-networking 1.12.0) selects its nodes
-with it. Without the label the agent runs on no node, and tenant workers boot but never join
-their cluster. The check reads the selector from the DaemonSet, so it follows the chart if the
-selector changes.
+Before upgrading to 1.0.1, every node carrying the overlay must be labelled
+`node-role.kubernetes.io/network=`; otherwise the Kube-OVN DaemonSets leave those nodes.
+
+Kube-OVN no longer reads `kmetal.io/ovn`, but the kmetal-networking agent DaemonSet
+(`kmetal-system-kmetal-networking-agent`, chart kmetal-networking 1.12.0) still selects its
+nodes with `kmetal.io/ovn=true`. Keep the label on every network node; without it the agent
+runs on no node, and tenant workers boot but never join their cluster. The check reads the
+selector from the DaemonSet, so it follows the chart if the selector changes.
 
 ## Kube-OVN central nodes
 
@@ -96,43 +98,52 @@ There are two kinds:
 
 | Kind | Declared in | Checked by |
 |---|---|---|
-| **Default** | `setup.env` `PROVIDER_NETWORKS`, and the `KMetal` resource | `undercluster` (interface, VLAN, no IP); `kmetal` → `providers` (subnets, interface on each node) |
+| **Default** | The inventory's `kmv_provider_networks`, and the `KMetal` resource | `undercluster` (interface, VLAN, no IP); `kmetal` → `providers` (subnets, interface on each node) |
 | **Additional** | The `KMetal` resource only; created and managed by the platform | `kmetal` → `providers` |
 
-`kmetal` → `providers` compares the two lists by interface name. A network found only in
-`setup.env` is a WARN, because the platform does not use it.
+`kmetal` → `providers` compares the two lists by interface name. A network found only in the
+inventory is a WARN, because the platform does not use it.
 
 Rules for every provider network:
 
 | Rule | Result if broken |
 |---|---|
 | `defaultProviderSubnet` names an existing subnet | FAIL |
+| A subnet is literally named `external` (VPC external access needs it) | FAIL |
 | `excludeNodes` entries are nodes | WARN |
 | At least one network node remains after `excludeNodes` | FAIL |
 | Subnet CIDR is canonical, gateway inside it | FAIL |
-| `excludeIPs` inside the CIDR | WARN |
+| `excludeIPs` inside the CIDR (single addresses or `first..last` ranges) | WARN |
 | No overlap with pod, service, join, node or other provider networks | FAIL |
 | Interface present on each target node, with carrier and no IPv4 | FAIL: list the node in `excludeNodes` if it has no such NIC |
-| Kernel VLAN device combined with a subnet `vlanID` other than 0 | WARN: frames would be tagged twice |
-| Default network's VLAN equals `PROV_VLAN` | FAIL |
+| Kernel VLAN device combined with a subnet `vlanID` other than 0 | WARN: frames would be tagged twice and dropped |
+| Default network's VLAN equals the inventory's `vlan` | FAIL |
+
+With `autoCreateVLANSubinterface: true`, the kMetal networking daemon creates the interface on
+each participating node. `undercluster` → `interfaces` then reports a missing interface as INFO.
 
 Interfaces of provider networks are often absent from netplan once kMetal is installed, because
 the platform manages them. `undercluster` → `netplan` reports this as INFO, not WARN.
 
 ## Load balancer ranges
 
-`spec.networking.loadBalancer` defines two MetalLB ranges:
+`spec.networking.loadBalancer` defines two MetalLB ranges. The operator creates a pool with a
+fixed name for each:
 
-| Range | Network | Serves |
-|---|---|---|
-| `tenantControlPlanes` | `tenant` | Kamaji tenant API servers |
-| `management` | `mgmt` | The console and platform services |
+| Range | Pool | Network | Serves |
+|---|---|---|---|
+| `tenantControlPlanes` | `tenant-cp-pool` | `tenant` | Kamaji tenant API servers |
+| `management` (optional) | `mgmt-pool` | `mgmt` | The console and platform services |
 
 Each range must lie inside its network and contain no node address (`undercluster` →
 `addressing`). It must also be served by an `IPAddressPool` and an `L2Advertisement`, and hand
-out working addresses (`kmetal` → `metallb`).
+out working addresses (`kmetal` → `metallb`). Without a `management` range, Services requesting
+it, the console included, stay Pending (WARN).
 
-The MetalLB speakers announce these addresses from the **control planes**:
+In kMetal 1.0.1 the MetalLB speakers run on the `spec.placement` nodes, the **control planes**
+by default:
 - No control plane may carry `node.kubernetes.io/exclude-from-external-load-balancers` (FAIL in
   `kmetal` → `nodes`, and in `undercluster` → `topology` when a kubeconfig works).
-- Each control plane should run a Ready speaker (WARN in `kmetal` → `metallb`).
+- Each placement node should run a Ready speaker (WARN in `kmetal` → `metallb`).
+- The placement nodes must be attached to the network of every pool: the control planes need
+  `tenant` and `mgmt` addresses (`undercluster` → `interfaces`).

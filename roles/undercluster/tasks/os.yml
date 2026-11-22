@@ -1,0 +1,33 @@
+---
+# os: Kubernetes and KubeVirt host prerequisites; workers must be able to run VMs.
+
+- name: os | verdicts
+  kmv_record:
+    group: os
+    verdicts: >-
+      {%- set m = kmv_n.misc -%}
+      {%- set bad = [] -%}
+      {%- set soft = [] -%}
+      {%- if (ansible_facts.swaptotal_mb | default(0) | int) > 0 -%}{%- set _ = bad.append('swap is on') -%}{%- endif -%}
+      {%- if m.ip_forward | default('') != '1' -%}{%- set _ = bad.append('net.ipv4.ip_forward=' ~ m.ip_forward | default('?')) -%}{%- endif -%}
+      {%- if not (m.inotify | default('') is match('^[0-9]+$') and m.inotify | int >= 8192) -%}
+      {%-   set _ = soft.append('fs.inotify.max_user_instances=' ~ m.inotify | default('?') ~ ' (< 8192)') -%}
+      {%- endif -%}
+      {%- if m.br_netfilter | default('0') != '1' -%}{%- set _ = soft.append('br_netfilter not loaded') -%}{%- endif -%}
+      {%- if m.conntrack | default('0') != '1' -%}{%- set _ = soft.append('conntrack missing') -%}{%- endif -%}
+      {%- if m.socat | default('0') != '1' -%}{%- set _ = soft.append('socat missing') -%}{%- endif -%}
+      {%- if m.ntp | default('') != 'yes' -%}{%- set _ = soft.append('clock not NTP-synchronised') -%}{%- endif -%}
+      {%- if m.curl | default('0') != '1' -%}{%- set _ = soft.append('curl missing (internet checks skipped)') -%}{%- endif -%}
+      {%- if m.ping | default('0') != '1' -%}{%- set _ = bad.append('ping missing (mesh checks impossible)') -%}{%- endif -%}
+      {%- if kmv_role == 'worker' -%}
+      {%-   if m.kvm | default('0') != '1' -%}{%- set _ = bad.append('/dev/kvm missing') -%}{%- endif -%}
+      {%-   if (m.kvm_mod | default(0) | int) < 1 -%}{%- set _ = bad.append('kvm_intel/kvm_amd not loaded') -%}{%- endif -%}
+      {%- endif -%}
+      {%- set v = [] -%}
+      {%- if bad -%}{%- set _ = v.append({'level': 'FAIL', 'msg': inventory_hostname ~ ': ' ~ (bad | kmv_joinc)}) -%}{%- endif -%}
+      {%- if soft -%}{%- set _ = v.append({'level': 'WARN', 'msg': inventory_hostname ~ ': ' ~ (soft | kmv_joinc)}) -%}{%- endif -%}
+      {%- if not bad and not soft -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': inventory_hostname ~ ': swap off, ip_forward, inotify, br_netfilter, NTP'
+                             ~ (', /dev/kvm' if kmv_role == 'worker' else '')}) -%}
+      {%- endif -%}
+      {{ v }}

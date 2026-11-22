@@ -1,0 +1,39 @@
+---
+# Scenario e2e, checks: per environment that came up, tenant API access and the full set of
+# checks inside the cluster; the EIP in environment a; overlap and isolation between a and b.
+
+- name: e2e | tenant API access
+  ansible.builtin.include_tasks:
+    file: access.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: "{{ ['a', 'b'] | select('in', _e2e_up) | list }}"
+  loop_control:
+    loop_var: key
+
+- name: e2e | inside the tenant clusters
+  ansible.builtin.include_tasks:
+    file: inside.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: "{{ ['a', 'b'] | select('in', _e2e_tk) | list }}"
+  loop_control:
+    loop_var: key
+  vars:
+    _level: full
+
+- name: e2e | EIP
+  ansible.builtin.include_tasks:
+    file: eip.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  when: "'a' in _e2e_tk"
+
+- name: e2e | overlap and isolation
+  ansible.builtin.include_tasks:
+    file: overlap.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _k1: a
+    _k2: b

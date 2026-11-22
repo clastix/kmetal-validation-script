@@ -1,3 +1,7 @@
 setup.env
 customer-example
 e2e_reports
+.venv/
+collections/
+inventory/poc/
+*kubeconfig

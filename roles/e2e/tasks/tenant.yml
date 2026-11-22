@@ -1,0 +1,78 @@
+---
+# Tenant _t: ServiceAccount _t (its owner) in the tenant group's namespace, and the Capsule
+# Tenant _t owned by it. Verdicts go to group _grp. Sets _e2e_tenant_ok[_t].
+
+- name: tenant | Look for the namespace {{ _e2e_sa_ns }} of the tenant owners
+  ansible.builtin.command: kubectl get namespace {{ _e2e_sa_ns }}
+  register: _tn_sa_ns
+  changed_when: false
+  failed_when: false
+  when: not (_e2e_sa_ns_ready | default(false))
+
+- name: tenant | Create the namespace {{ _e2e_sa_ns }} (deleted at the end)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata: {name: "{{ _e2e_sa_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+  register: _tn_sa_create
+  ignore_errors: true
+  when: not (_e2e_sa_ns_ready | default(false)) and _tn_sa_ns.rc != 0
+
+- name: tenant | namespace verdict
+  kmv_record:
+    group: "{{ _grp }}"
+    verdicts:
+      - level: INFO
+        msg: "created namespace {{ _e2e_sa_ns }} for tenant ServiceAccounts"
+  when: not (_e2e_sa_ns_ready | default(false)) and _tn_sa_ns.rc != 0 and not (_tn_sa_create.failed | default(false))
+
+- name: tenant | Create the ServiceAccount {{ _t }} and the Capsule Tenant {{ _t }} it owns
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: List
+      items:
+        - apiVersion: v1
+          kind: ServiceAccount
+          metadata: {name: "{{ _t }}", namespace: "{{ _e2e_sa_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+        - apiVersion: capsule.clastix.io/v1beta2
+          kind: Tenant
+          metadata: {name: "{{ _t }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+          spec:
+            owners: [{kind: ServiceAccount, name: "system:serviceaccount:{{ _e2e_sa_ns }}:{{ _t }}"}]
+  register: _tn_apply
+  ignore_errors: true
+
+- name: tenant | remember what was created
+  ansible.builtin.set_fact:
+    _e2e_sa_ns_ready: true
+    kmv_created: true
+
+- name: tenant | Wait for the Tenant {{ _t }} to be Ready (up to 2 min)
+  ansible.builtin.command: kubectl get tenants.capsule.clastix.io {{ _t }} -o json
+  register: _tn_get
+  until: >-
+    _tn_get.rc == 0 and (((_tn_get.stdout | from_json) | kmv_ready)
+    or ((_tn_get.stdout | from_json).status.state | default('')) == 'Active')
+  retries: 40
+  delay: 3
+  changed_when: false
+  failed_when: false
+  when: not (_tn_apply.failed | default(false))
+
+- name: tenant | result
+  ansible.builtin.set_fact:
+    _e2e_tenant_ok: >-
+      {{ _e2e_tenant_ok | default({}) | combine({_t: (not (_tn_apply.failed | default(false))) and (_tn_get.rc | default(1)) == 0
+           and (((_tn_get.stdout | from_json) | kmv_ready) or ((_tn_get.stdout | from_json).status.state | default('')) == 'Active')}) }}
+
+- name: tenant | verdict
+  kmv_record:
+    group: "{{ _grp }}"
+    verdicts:
+      - "{{ {'level': 'PASS', 'msg': 'Tenant ' ~ _t ~ ' Ready, owner system:serviceaccount:' ~ _e2e_sa_ns ~ ':' ~ _t} if _e2e_tenant_ok[_t]
+            else {'level': 'FAIL', 'msg': 'cannot create Tenant ' ~ _t ~ ': ' ~ _tn_apply.msg | default('') | truncate(200)} if _tn_apply.failed | default(false)
+            else {'level': 'FAIL', 'msg': 'Tenant ' ~ _t ~ ' not Ready in 120s'} }}"

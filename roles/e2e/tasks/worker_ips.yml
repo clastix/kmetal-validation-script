@@ -1,0 +1,36 @@
+---
+# Worker addresses of environment `_wk` inside kmv_e2e_subnet_cidr: the tenant nodes'
+# InternalIPs (when its API is reachable) and the VMI interface addresses on the under
+# cluster. Sets _e2e_ips[_wk].
+
+- name: worker addresses {{ _wk }} | Read the tenant nodes' addresses
+  ansible.builtin.command:
+    argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_wk] | default({})).kc | default('') }}", get, nodes, -o, json]
+  delegate_to: "{{ (_e2e_tk[_wk] | default({})).host | default('localhost') }}"
+  ignore_unreachable: true
+  register: _wi_nodes
+  changed_when: false
+  failed_when: false
+  when: _wk in _e2e_tk
+
+- name: worker addresses {{ _wk }} | Read the worker VMs' addresses
+  ansible.builtin.command: kubectl get vmi -n {{ _e2e_envs[_wk].ns }} -o json
+  register: _wi_vmi
+  changed_when: false
+  failed_when: false
+
+- name: worker addresses {{ _wk }} | collect
+  ansible.builtin.set_fact:
+    _e2e_ips: >-
+      {%- set ips = [] -%}
+      {%- if (_wi_nodes.rc | default(1)) == 0 -%}
+      {%-   for n in (_wi_nodes.stdout | from_json)['items'] -%}
+      {%-     for a in n.status.addresses | default([]) if a.type == 'InternalIP' -%}{%- set _ = ips.append(a.address) -%}{%- endfor -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- if _wi_vmi.rc == 0 -%}
+      {%-   for vmi in (_wi_vmi.stdout | from_json)['items'] -%}
+      {%-     for i in vmi.status.interfaces | default([]) if i.ipAddress | default('') -%}{%- set _ = ips.append(i.ipAddress) -%}{%- endfor -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {{ _e2e_ips | combine({_wk: ips | select('kmv_valid_ip') | select('kmv_in', kmv_e2e_subnet_cidr) | unique | sort | list}) }}

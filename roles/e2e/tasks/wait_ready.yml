@@ -1,0 +1,26 @@
+---
+# Waits until an object is ready: Ready condition True, .status.ready true, or a READY
+# printer column of True. Inputs: _wr_kind, _wr_name, _wr_ns, _wr_retries (5 s apart).
+# Sets _wr_ok and _wr_status (the object's .status, for diagnostics).
+#
+# The shell step prints the object as JSON, the marker line @@table@@, then the kubectl
+# table; the kmv_ready_output filter parses both (an absent or unreadable part counts as
+# not ready). The marker needs no escaping: a '\n' inside a folded YAML block reaches Jinja
+# as a backslash and an n, not as a newline.
+
+- name: wait | Wait for the {{ _wr_kind.split('.')[0] | regex_replace('s$', '') }} {{ _wr_ns }}/{{ _wr_name }} to be Ready
+  ansible.builtin.shell: |
+    kubectl get {{ _wr_kind }} {{ _wr_name | quote }} -n {{ _wr_ns | quote }} -o json
+    echo '@@table@@'
+    kubectl get {{ _wr_kind }} {{ _wr_name | quote }} -n {{ _wr_ns | quote }}
+  register: _wr
+  until: (_wr.stdout | default('') | kmv_ready_output).ready
+  retries: "{{ _wr_retries | default(60) }}"
+  delay: 5
+  changed_when: false
+  failed_when: false
+
+- name: wait | result
+  ansible.builtin.set_fact:
+    _wr_ok: "{{ (_wr.stdout | default('') | kmv_ready_output).ready }}"
+    _wr_status: "{{ (_wr.stdout | default('') | kmv_ready_output).status }}"

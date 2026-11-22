@@ -1,0 +1,18 @@
+---
+# Diagnostics of a failed test pod: its last log lines, the namespace's latest events and
+# the events of its PVC. Inputs: _diag_ns, _diag_pod, _diag_pvc (optional).
+
+- name: diagnostics | Collect the logs and events of {{ _diag_ns }}/{{ _diag_pod }}  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
+  ansible.builtin.shell: |
+    kubectl logs -n {{ _diag_ns | quote }} {{ _diag_pod | quote }} --tail=10 2>&1
+    kubectl get events -n {{ _diag_ns | quote }} --sort-by=.lastTimestamp 2>/dev/null | tail -n 8
+    {% if _diag_pvc | default('') %}
+    kubectl describe pvc -n {{ _diag_ns | quote }} {{ _diag_pvc | quote }} 2>/dev/null | sed -n '/^Events:/,$p' | tail -n 6
+    {% endif %}
+  register: _diag
+  changed_when: false
+  failed_when: false
+
+- name: diagnostics | {{ _diag_ns }}/{{ _diag_pod }}
+  ansible.builtin.debug:
+    msg: "{{ _diag.stdout_lines }}"

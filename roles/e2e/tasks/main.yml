@@ -1,0 +1,92 @@
+---
+# End-to-end tests. Two scenarios, selected by tag:
+#   e2e          one tenant, two environments (a, b) on the same subnet CIDR
+#   e2e-tenants  two tenants (t1, t2), one environment each, on the same subnet CIDR
+# Both set up their environments and apply their clusters first; then all clusters are
+# awaited together; then each scenario's checks run. Every environment is a key in
+# _e2e_envs: {tenant, ns, cluster, workers, group}.
+
+- name: e2e | scenarios selected by tag
+  ansible.builtin.set_fact:
+    _e2e_do_envs: "{{ ('all' in ansible_run_tags or 'e2e' in ansible_run_tags) and 'e2e' not in ansible_skip_tags }}"
+    _e2e_do_tenants: "{{ ('all' in ansible_run_tags or 'e2e-tenants' in ansible_run_tags) and 'e2e-tenants' not in ansible_skip_tags }}"
+    _e2e_fails_before: >-
+      {{ ansible_facts.kmv_results | default([]) | selectattr('level', 'eq', 'FAIL')
+         | selectattr('group', 'in', ['platform', 'operator', 'metallb', 'storage', 'nodes', 'providers', 'tenancy', 'capi', 'kubevirt', 'crds'])
+         | list | length }}
+    _e2e_envs: {}
+    _e2e_ok: {}
+    _e2e_applied: []
+    _e2e_up: []
+    _e2e_tk: {}
+    _e2e_ips: {}
+
+- name: e2e | skipped after earlier failures
+  kmv_record:
+    group: e2e
+    verdicts:
+      - level: WARN
+        msg: "end-to-end tests skipped: {{ _e2e_fails_before }} failures above (use -e kmv_force_e2e=true to run anyway)"
+  when: (_e2e_do_envs or _e2e_do_tenants) and _e2e_fails_before | int > 0 and not kmv_force_e2e | bool
+
+- name: e2e | run
+  when: (_e2e_do_envs or _e2e_do_tenants) and (_e2e_fails_before | int == 0 or kmv_force_e2e | bool)
+  block:
+    - name: e2e | prepare
+      ansible.builtin.import_tasks: prepare.yml
+
+    - name: e2e | scenario e2e, setup
+      ansible.builtin.include_tasks:
+        file: scenario_envs_setup.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: _e2e_ready and _e2e_do_envs
+
+    - name: e2e | scenario e2e-tenants, setup
+      ansible.builtin.include_tasks:
+        file: scenario_tenants_setup.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: _e2e_ready and _e2e_do_tenants
+
+    - name: e2e | wait for every tenant cluster
+      ansible.builtin.include_tasks:
+        file: wait_clusters.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: _e2e_applied | length > 0
+
+    - name: e2e | scenario e2e, checks
+      ansible.builtin.include_tasks:
+        file: scenario_envs_checks.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: "'a' in _e2e_applied or 'b' in _e2e_applied"
+
+    - name: e2e | scenario e2e-tenants, checks
+      ansible.builtin.include_tasks:
+        file: scenario_tenants_checks.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: "'t1' in _e2e_applied or 't2' in _e2e_applied"
+
+  always:
+    - name: e2e | Delete the tenant Service web, which releases the EIP
+      ansible.builtin.command:
+        argv: [kubectl, --kubeconfig, "{{ (_e2e_tk.a | default({})).kc | default('') }}", delete, service, web, -n, kmetal-validate, --ignore-not-found, --wait=true, --timeout=120s]
+      delegate_to: "{{ (_e2e_tk.a | default({})).host | default('localhost') }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+      when: "'a' in (_e2e_tk | default({})) and _e2e_eip_applied | default(false) and not kmv_keep | bool"
+
+    - name: e2e | Remove the temporary tenant kubeconfigs
+      ansible.builtin.file:
+        path: "{{ item.value.kc }}"
+        state: absent
+      delegate_to: "{{ item.value.host }}"
+      ignore_unreachable: true
+      loop: "{{ _e2e_tk | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }} on {{ item.value.host }}"
+      failed_when: false

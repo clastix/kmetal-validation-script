@@ -1,0 +1,103 @@
+---
+# Under cluster checks: compare the nodes with the inventory over SSH (sudo).
+#
+#   ansible-playbook -i inventory/<site> playbooks/undercluster.yml
+#   ansible-playbook -i inventory/<site> playbooks/undercluster.yml --tags interfaces,mesh
+#
+# Check groups (tags): topology addressing hardware os interfaces netplan mesh internet encap.
+# connectivity always runs. Help: ansible-playbook playbooks/help.yml -e cmd=undercluster
+
+- name: Under cluster 1/3 - on this machine - validate the inventory, read the cluster, check topology and addressing
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - common
+  environment:
+    KUBECONFIG: "{{ kmv_kubeconfig | expanduser }}"
+  vars:
+    kmv_need_env: true
+  tasks:
+    - name: Prepare
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: prepare
+      tags: [always, prepare]
+
+    - name: Topology
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: topology
+      tags: [topology]
+
+    - name: Addressing
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: addressing
+      tags: [addressing]
+
+- name: Under cluster 2/3 - on every node, in parallel, over SSH with sudo
+  hosts: kmetal_nodes
+  become: true
+  gather_facts: false
+  roles:
+    - common
+  tasks:
+    - name: Connectivity
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: connectivity
+      tags: [always, connectivity]
+
+    - name: Hardware
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: hardware
+      tags: [hardware]
+
+    - name: OS prerequisites
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: os
+      tags: [os]
+
+    - name: Interfaces
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: interfaces
+      tags: [interfaces]
+
+    - name: Netplan
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: netplan
+      tags: [netplan]
+
+    - name: Mesh
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: mesh
+      tags: [mesh]
+
+    - name: Internet
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: internet
+      tags: [internet]
+
+    - name: Encapsulation
+      ansible.builtin.import_role:
+        name: undercluster
+        tasks_from: encap
+      tags: [encap]
+
+- name: Under cluster 3/3 - summary
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - common
+  tasks:
+    - name: Summary
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: summary
+      tags: [always, summary]

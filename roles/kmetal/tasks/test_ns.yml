@@ -1,0 +1,30 @@
+---
+# Creates the run's temporary namespace kmetal-validate-<run ID> once. The cleanup role
+# deletes it through its run-ID label.
+
+- name: test namespace | Create the namespace kmetal-validate-{{ kmv_rid }} for the smoke tests (deleted at the end)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "kmetal-validate-{{ kmv_rid }}"
+        labels: "{{ {kmv_label_key: kmv_rid} }}"
+  register: _test_ns
+  ignore_errors: true
+  when: kmv_test_ns is not defined
+
+- name: test namespace | remember it
+  ansible.builtin.set_fact:
+    kmv_test_ns: "kmetal-validate-{{ kmv_rid }}"
+    kmv_created: true
+  when: kmv_test_ns is not defined and not (_test_ns.failed | default(false))
+
+- name: test namespace | not created
+  kmv_record:
+    group: "{{ _tns_group | default('kmetal') }}"
+    verdicts:
+      - level: FAIL
+        msg: "cannot create namespace kmetal-validate-{{ kmv_rid }}: {{ _test_ns.msg | default('') | truncate(200) }}"
+  when: kmv_test_ns is not defined and (_test_ns.failed | default(false))

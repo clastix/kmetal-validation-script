@@ -1,0 +1,196 @@
+---
+# Inside the tenant cluster of environment `key` (tenant kubectl through _e2e_tk[key]):
+#   basic: nodes Ready; egress to the internet through the VPC router and the provider
+#   full:  also a PVC on the tenant default class, backed by tenantClassName on the under
+#          cluster; for environment a, worker VMs on different hosts and pod traffic
+#          between the two workers.
+# Inputs: key, _level (basic | full).
+
+- name: inside {{ key }} | tenant kubectl
+  ansible.builtin.set_fact:
+    _tk: "{{ ['kubectl', '--kubeconfig', _e2e_tk[key].kc] }}"
+
+- name: inside {{ key }} | Wait for {{ _e2e_envs[key].workers }} Ready node(s) in the tenant cluster (up to 15 min)
+  ansible.builtin.command:
+    argv: "{{ _tk + ['get', 'nodes', '-o', 'json'] }}"
+  delegate_to: "{{ _e2e_tk[key].host }}"
+  ignore_unreachable: true
+  register: _in_nodes
+  until: >-
+    _in_nodes.rc == 0 and ((_in_nodes.stdout | from_json)['items']
+    | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'Ready') | map('selectattr', 'status', 'eq', 'True')
+    | map('list') | select | list | length) >= _e2e_envs[key].workers
+  retries: 60
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: inside {{ key }} | nodes result
+  ansible.builtin.set_fact:
+    _in_ready: >-
+      {{ _in_nodes.rc == 0 and ((_in_nodes.stdout | from_json)['items']
+         | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'Ready') | map('selectattr', 'status', 'eq', 'True')
+         | map('list') | select | list | length) >= _e2e_envs[key].workers }}
+
+- name: inside {{ key }} | nodes Ready
+  kmv_record:
+    group: "{{ _e2e_envs[key].group }}"
+    verdicts:
+      - level: PASS
+        msg: "{{ _e2e_envs[key].cluster }}: {{ _e2e_envs[key].workers }} node(s) Ready"
+  when: _in_ready
+
+- name: inside {{ key }} | nodes not Ready
+  when: not _in_ready
+  block:
+    - name: inside {{ key }} | Read the Sveltos ClusterSummaries (CNI delivery), for the diagnosis
+      ansible.builtin.shell: |
+        kubectl get clustersummaries -n {{ _e2e_envs[key].ns }} 2>&1
+      register: _in_diag
+      changed_when: false
+      failed_when: false
+
+    - name: inside {{ key }} | verdict
+      kmv_record:
+        group: "{{ _e2e_envs[key].group }}"
+        verdicts:
+          - level: FAIL
+            msg: >-
+              {{ _e2e_envs[key].cluster }}: nodes not Ready in 15m (no CNI? check: kubectl get clustersummaries -n {{ _e2e_envs[key].ns }}):
+              {{ _in_diag.stdout_lines | default([]) | join(' | ') | truncate(300) }}
+
+- name: inside {{ key }} | workloads
+  when: _in_ready
+  block:
+    - name: inside {{ key }} | Create the namespace kmetal-validate in the tenant cluster
+      ansible.builtin.command:
+        argv: "{{ _tk + ['apply', '-f', '-'] }}"
+        stdin: "{{ {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kmetal-validate'}} | to_json }}"
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+
+    - name: inside {{ key }} | storage
+      when: _level == 'full'
+      block:
+        - name: inside {{ key }} | Create a PVC on the tenant default class and a pod that writes to it
+          ansible.builtin.command:
+            argv: "{{ _tk + ['apply', '-f', '-'] }}"
+            stdin: >-
+              {{ {'apiVersion': 'v1', 'kind': 'List', 'items': [
+                   {'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim', 'metadata': {'name': 'data', 'namespace': 'kmetal-validate'},
+                    'spec': {'accessModes': ['ReadWriteOnce'], 'resources': {'requests': {'storage': '1Gi'}}}},
+                   {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'writer', 'namespace': 'kmetal-validate'},
+                    'spec': {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 1,
+                             'containers': [{'name': 'c', 'image': kmv_probe_image, 'command': ['sh', '-c', 'echo tenant > /data/f && sync && cat /data/f'],
+                                             'volumeMounts': [{'name': 'd', 'mountPath': '/data'}]}],
+                             'volumes': [{'name': 'd', 'persistentVolumeClaim': {'claimName': 'data'}}]}}]} | to_json }}
+          delegate_to: "{{ _e2e_tk[key].host }}"
+          ignore_unreachable: true
+          changed_when: true
+          failed_when: false
+
+        - name: inside {{ key }} | Wait for the writer pod (up to 7 min)
+          ansible.builtin.command:
+            argv: "{{ _tk + ['get', 'pod', 'writer', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
+          delegate_to: "{{ _e2e_tk[key].host }}"
+          ignore_unreachable: true
+          register: _in_writer
+          until: _in_writer.stdout in ['Succeeded', 'Failed']
+          retries: 84
+          delay: 5
+          changed_when: false
+          failed_when: false
+
+        - name: inside {{ key }} | Read the tenant PVC's UID
+          ansible.builtin.command:
+            argv: "{{ _tk + ['get', 'pvc', 'data', '-n', 'kmetal-validate', '-o', 'jsonpath={.metadata.uid}'] }}"
+          delegate_to: "{{ _e2e_tk[key].host }}"
+          ignore_unreachable: true
+          register: _in_uid
+          changed_when: false
+          failed_when: false
+          when: _in_writer.stdout == 'Succeeded'
+
+        - name: inside {{ key }} | Find the under-cluster PVC behind it and its storage class
+          ansible.builtin.command: kubectl get pvc -n {{ _e2e_envs[key].ns }} -o json
+          register: _in_pvcs
+          changed_when: false
+          failed_when: false
+          when: _in_writer.stdout == 'Succeeded'
+
+        - name: inside {{ key }} | storage verdicts
+          kmv_record:
+            group: "{{ _e2e_envs[key].group }}"
+            verdicts: >-
+              {%- set name = _e2e_envs[key].cluster -%}
+              {%- if _in_writer.stdout != 'Succeeded' -%}
+              {{ [{'level': 'FAIL', 'msg': name ~ ': tenant PVC/pod did not complete in 7m'}] }}
+              {%- else -%}
+              {%-   set uid = _in_uid.stdout | default('') -%}
+              {%-   set tc = kmv_km.spec.storage.tenantClassName | default('') -%}
+              {%-   set sc = (((_in_pvcs.stdout | default('{}', true) | from_json)['items'] | default([])) | selectattr('metadata.name', 'search', uid | regex_escape)
+                              | map(attribute='spec.storageClassName') | first) | default('') if uid else '' -%}
+              {%-   set v = [{'level': 'PASS', 'msg': name ~ ': tenant PVC Bound, write/read OK'}] -%}
+              {%-   if not sc -%}{%- set _ = v.append({'level': 'WARN', 'msg': name ~ ': no under-cluster PVC in ' ~ _e2e_envs[key].ns ~ ' carries the tenant PVC UID ' ~ uid}) -%}
+              {%-   elif sc == tc -%}{%- set _ = v.append({'level': 'PASS', 'msg': name ~ ': tenant volume is backed by ' ~ tc ~ ' on the under cluster'}) -%}
+              {%-   else -%}{%- set _ = v.append({'level': 'FAIL', 'msg': name ~ ': tenant volume is backed by ' ~ sc ~ ', expected tenantClassName ' ~ tc}) -%}
+              {%-   endif -%}
+              {{ v }}
+              {%- endif -%}
+
+    - name: inside {{ key }} | Start a pod that fetches {{ kmv_internet_probe_url }} (egress through the VPC router and the provider network)
+      ansible.builtin.command:
+        argv: "{{ _tk + ['apply', '-f', '-'] }}"
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'egress', 'namespace': 'kmetal-validate'},
+              'spec': {'restartPolicy': 'Never', 'terminationGracePeriodSeconds': 1,
+                       'containers': [{'name': 'c', 'image': kmv_curl_image,
+                                       'command': ['sh', '-c', "curl -sS -o /dev/null -m 10 -w '%{http_code}' " ~ kmv_internet_probe_url]}]}} | to_json }}
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      changed_when: true
+      failed_when: false
+
+    - name: inside {{ key }} | Wait for the egress pod (up to 4 min)
+      ansible.builtin.command:
+        argv: "{{ _tk + ['get', 'pod', 'egress', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
+      delegate_to: "{{ _e2e_tk[key].host }}"
+      ignore_unreachable: true
+      register: _in_egress
+      until: _in_egress.stdout in ['Succeeded', 'Failed']
+      retries: 48
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: inside {{ key }} | Read the SNAT address and the egress pod's log
+      ansible.builtin.command: "{{ item.argv }}"
+      delegate_to: "{{ item.host }}"
+      ignore_unreachable: true
+      loop:
+        - {argv: "kubectl get eipclaims.network.kmetal.io external -n {{ _e2e_envs[key].ns }}", host: localhost}
+        - {argv: "{{ (_tk + ['logs', 'egress', '-n', 'kmetal-validate', '--tail=3']) | join(' ') }}", host: "{{ _e2e_tk[key].host }}"}
+      loop_control:
+        label: "{{ item.argv.split(' ')[1] }}"
+      register: _in_snat
+      changed_when: false
+      failed_when: false
+
+    - name: inside {{ key }} | egress verdict
+      kmv_record:
+        group: "{{ _e2e_envs[key].group }}"
+        verdicts:
+          - "{{ {'level': 'PASS', 'msg': _e2e_envs[key].cluster ~ ': egress to ' ~ kmv_internet_probe_url ~ ' through the provider network (SNAT '
+                                         ~ (_in_snat.results[0].stdout | default('') | kmv_table_col('V4')) ~ ')'}
+                if _in_egress.stdout == 'Succeeded' else
+                {'level': 'FAIL', 'msg': _e2e_envs[key].cluster ~ ': no egress from the tenant cluster to ' ~ kmv_internet_probe_url ~ ': '
+                                         ~ _in_snat.results[1].stdout_lines | default([]) | join(' | ') | truncate(200)} }}"
+
+    - name: inside {{ key }} | cross-node traffic
+      ansible.builtin.include_tasks:
+        file: crossnode.yml
+        apply:
+          tags: [e2e, e2e-tenants]
+      when: _level == 'full' and key == 'a'

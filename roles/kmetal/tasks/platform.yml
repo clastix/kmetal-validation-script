@@ -1,0 +1,38 @@
+---
+# platform: the KMetal resource is READY and every .status.components[] entry is Ready.
+
+- name: platform | Read the READY and VERSION columns of the KMetal resource
+  ansible.builtin.command: kubectl get km {{ kmv_km.metadata.name }}
+  register: _km_table
+  changed_when: false
+  failed_when: false
+  when: kmv_km | length > 0
+
+- name: platform | verdicts
+  kmv_record:
+    group: platform
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- if not kmv_km -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'no KMetal resource (kubectl get km)'}) -%}
+      {%- else -%}
+      {%-   set name = kmv_km.metadata.name -%}
+      {%-   set ready = _km_table.stdout | default('') | kmv_table_col('READY') -%}
+      {%-   set version = _km_table.stdout | default('') | kmv_table_col('VERSION') -%}
+      {%-   if ready == 'True' -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'KMetal ' ~ name ~ ' READY=True, version ' ~ (version or 'unknown')}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'KMetal ' ~ name ~ ' READY=' ~ (ready or 'unknown')}) -%}
+      {%-   endif -%}
+      {%-   set comps = kmv_km.status.components | default([], true) -%}
+      {%-   if comps | length == 0 -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'KMetal reports no .status.components'}) -%}
+      {%-   else -%}
+      {%-     set bad = comps | rejectattr('phase', 'eq', 'Ready') | list -%}
+      {%-     for c in bad -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'component ' ~ c.name ~ ' is ' ~ c.phase | default('?') ~ ((': ' ~ c.message) if c.message | default('') else '')}) -%}
+      {%-     endfor -%}
+      {%-     if not bad -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'all ' ~ comps | length ~ ' components Ready'}) -%}{%- endif -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}

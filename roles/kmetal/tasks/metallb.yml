@@ -1,0 +1,154 @@
+---
+# metallb: each loadBalancer.tenantControlPlanes / management range is served by an
+# IPAddressPool in kmetal-metallb (kMetal 1.0.1 names them tenant-cp-pool and mgmt-pool),
+# advertised by an L2Advertisement; a Ready speaker runs on every spec.placement node
+# (control planes by default); a LoadBalancer Service pinned to each pool gets an address in
+# range and answers HTTP.
+
+- name: metallb | Read the address pools, L2 advertisements, speaker pods and nodes
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get ipaddresspools.metallb.io -n {{ kmv_ns_metallb }} -o json
+    - kubectl get l2advertisements.metallb.io -n {{ kmv_ns_metallb }} -o json
+    - kubectl get pods -n {{ kmv_ns_metallb }} -l app.kubernetes.io/component=speaker -o json
+    - kubectl get nodes -o json
+  register: _lb_read
+  changed_when: false
+  failed_when: false
+
+- name: metallb | evaluate
+  ansible.builtin.set_fact:
+    _lb: >-
+      {%- set spec = kmv_km.spec | default({}) -%}
+      {%- set pools = (_lb_read.results[0].stdout | from_json)['items'] if _lb_read.results[0].rc == 0 else none -%}
+      {%- set l2 = (_lb_read.results[1].stdout | from_json)['items'] if _lb_read.results[1].rc == 0 else [] -%}
+      {%- set speakers = (_lb_read.results[2].stdout | from_json)['items'] if _lb_read.results[2].rc == 0 else [] -%}
+      {%- set nodes = (_lb_read.results[3].stdout | from_json)['items'] if _lb_read.results[3].rc == 0 else [] -%}
+      {%- set v = [] -%}
+      {%- set pool_for = {} -%}
+      {%- if pools is none -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'no IPAddressPool API in ' ~ kmv_ns_metallb}) -%}
+      {%- else -%}
+      {%-   set names = pools | map(attribute='metadata.name') | list -%}
+      {%-   for role in ['tenantControlPlanes', 'management'] -%}
+      {%-     set ranges = spec.networking.loadBalancer[role].addresses | default([], true) -%}
+      {%-     set fixed = kmv_pool_names[role] -%}
+      {%-     if not ranges -%}
+      {%-       if role == 'management' -%}
+      {%-         set _ = v.append({'level': 'WARN', 'msg': 'spec.networking.loadBalancer.management.addresses is empty: Services requesting the management pool (the console) stay Pending'}) -%}
+      {%-       else -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': 'spec.networking.loadBalancer.tenantControlPlanes.addresses is empty'}) -%}
+      {%-       endif -%}
+      {%-     else -%}
+      {%-       if fixed not in names -%}
+      {%-         set _ = v.append({'level': 'FAIL' if role == 'tenantControlPlanes' else 'WARN',
+                                    'msg': 'no IPAddressPool ' ~ fixed ~ ' in ' ~ kmv_ns_metallb ~ ' (kMetal ' ~ kmv_target_kmetal ~ ' creates it from loadBalancer.' ~ role
+                                           ~ ((', and tenant control planes take their address from it') if role == 'tenantControlPlanes' else '') ~ ')'}) -%}
+      {%-       endif -%}
+      {%-       for r in ranges -%}
+      {%-         set found = [] -%}
+      {%-         for p in pools -%}
+      {%-           for a in p.spec.addresses | default([]) if a | kmv_same_range(r) -%}{%- set _ = found.append(p.metadata.name) -%}{%- endfor -%}
+      {%-         endfor -%}
+      {%-         if found -%}
+      {%-           set pick = fixed if fixed in found else found[0] -%}
+      {%-           set _ = v.append({'level': 'PASS', 'msg': 'loadBalancer.' ~ role ~ ' ' ~ r ~ ' is served by IPAddressPool ' ~ pick}) -%}
+      {%-           if role not in pool_for -%}{%- set _ = pool_for.update({role: pick}) -%}{%- endif -%}
+      {%-         else -%}
+      {%-           set _ = v.append({'level': 'FAIL', 'msg': 'loadBalancer.' ~ role ~ ' ' ~ r ~ ' is not in any IPAddressPool of ' ~ kmv_ns_metallb}) -%}
+      {%-         endif -%}
+      {%-       endfor -%}
+      {%-     endif -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- if not l2 -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'no L2Advertisement in ' ~ kmv_ns_metallb}) -%}
+      {%- else -%}
+      {%-   for role, p in pool_for.items() -%}
+      {%-     set ns = namespace(ok=false) -%}
+      {%-     for a in l2 -%}
+      {%-       set lp = a.spec.ipAddressPools | default([], true) -%}
+      {%-       set ls = a.spec.ipAddressPoolSelectors | default([], true) -%}
+      {%-       if (not lp and not ls) or p in lp or ls -%}{%- set ns.ok = true -%}{%- endif -%}
+      {%-     endfor -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'pool ' ~ p ~ ' is advertised by an L2Advertisement'} if ns.ok
+                              else {'level': 'FAIL', 'msg': 'pool ' ~ p ~ ' is not referenced by any L2Advertisement'}) -%}
+      {%-   endfor -%}
+      {%- endif -%}
+      {%- set sel = spec.placement.nodeSelector | default({kmv_cp_label: ''}, true) -%}
+      {%- set placement = [] -%}
+      {%- for n in nodes -%}
+      {%-   set labels = n.metadata.labels | default({}) -%}
+      {%-   set ns = namespace(match=true) -%}
+      {%-   for k, val in sel.items() if labels[k] | default(none) != val -%}{%- set ns.match = false -%}{%- endfor -%}
+      {%-   if ns.match -%}{%- set _ = placement.append(n.metadata.name) -%}{%- endif -%}
+      {%- endfor -%}
+      {%- set ready = speakers | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
+      {%- if not speakers -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'no MetalLB speaker pods found with app.kubernetes.io/component=speaker in ' ~ kmv_ns_metallb}) -%}
+      {%- else -%}
+      {%-   for n in placement -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': MetalLB speaker Ready (spec.placement node)'} if n in ready
+                              else {'level': 'WARN', 'msg': n ~ ': no Ready MetalLB speaker on this spec.placement node'}) -%}
+      {%-   endfor -%}
+      {%-   set elsewhere = ready | reject('in', placement) | list -%}
+      {%-   if elsewhere -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': 'MetalLB speakers also run outside spec.placement on: ' ~ elsewhere | join(' ') ~ ' (kMetal ' ~ kmv_target_kmetal ~ ' places them by spec.placement)'}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ {'verdicts': v, 'pool_for': pool_for, 'placement': placement} }}
+
+- name: metallb | verdicts
+  kmv_record:
+    group: metallb
+    verdicts: "{{ _lb.verdicts }}"
+
+- name: metallb | smoke test
+  when: _lb.pool_for | length > 0
+  block:
+    - name: metallb | test namespace
+      ansible.builtin.include_tasks:
+        file: test_ns.yml
+        apply:
+          tags: [metallb]
+      vars:
+        _tns_group: metallb
+
+    - name: metallb | Create an nginx backend in kmetal-validate-{{ kmv_rid }} (deleted at the end)
+      kubernetes.core.k8s:
+        state: present
+        wait: true
+        wait_timeout: 180
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: {name: lb-backend, namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+          spec:
+            replicas: 1
+            selector: {matchLabels: {app: lb-backend}}
+            template:
+              metadata: {labels: {app: lb-backend}}
+              spec:
+                containers: [{name: web, image: "{{ kmv_test_image }}", ports: [{containerPort: 80}]}]
+      register: _lb_backend
+      ignore_errors: true
+      when: kmv_test_ns is defined
+
+    - name: metallb | backend verdict
+      kmv_record:
+        group: metallb
+        verdicts:
+          - level: WARN
+            msg: "LB backend {{ kmv_test_image }} not ready; allocation is still tested"
+      when: kmv_test_ns is defined and (_lb_backend.failed | default(false) or _lb_backend.msg | default('') is search('timed out|Timeout'))
+
+    - name: metallb | one Service per pool
+      ansible.builtin.include_tasks:
+        file: metallb_pool.yml
+        apply:
+          tags: [metallb]
+      loop: "{{ _lb.pool_for | dict2items }}"
+      loop_control:
+        loop_var: _pool
+        label: "{{ _pool.value }}"
+      when: kmv_test_ns is defined

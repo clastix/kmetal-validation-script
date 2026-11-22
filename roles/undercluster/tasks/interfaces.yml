@@ -1,0 +1,92 @@
+---
+# interfaces: for each network the node is on, the interface exists, is UP with carrier, is
+# a VLAN device with the expected ID, has the expected MTU and carries the declared address.
+# Provider interfaces must exist on workers with their VLAN and carry no IPv4 address.
+
+- name: interfaces | verdicts
+  kmv_record:
+    group: interfaces
+    verdicts: >-
+      {%- set n = inventory_hostname -%}
+      {%- set km = hostvars['localhost'].kmv_km | default({}) -%}
+      {%- set central = hostvars['localhost'].kmv_central | default([]) -%}
+      {%- set auto_ifaces = km.spec.networking.providerNetworks | default([], true)
+                            | selectattr('autoCreateVLANSubinterface', 'defined')
+                            | selectattr('autoCreateVLANSubinterface') | map(attribute='interface') | list -%}
+      {%- set v = [] -%}
+      {%- for net, cfg in kmv_networks.items() -%}
+      {%-   set iface = cfg.interface -%}
+      {%-   set l = kmv_n.links | kmv_link(iface) -%}
+      {%-   if net not in kmv_addresses -%}
+      {%-     if net in kmv_optional_networks -%}
+      {%-       set _ = v.append({'level': 'INFO', 'msg': n ~ ': optional network ' ~ net ~ ' not configured'}) -%}
+      {%-     elif net == 'overlay' and kmv_role == 'cp' -%}
+      {%-       set _ = v.append({'level': 'INFO', 'msg': n ~ ": control plane without overlay interface: expected, Kube-OVN's tunnel runs on the network nodes ("
+                                  ~ kmv_network_label ~ ') only'
+                                  ~ ('; it is a central node, and the kMetal docs ask for tunnelInterface on every central node' if n in central else '')}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ': no ' ~ net ~ ' address declared; ' ~ kmv_role ~ ' nodes need the ' ~ net ~ ' network'}) -%}
+      {%-     endif -%}
+      {%-   elif not l -%}
+      {%-     set _ = v.append({'level': 'WARN' if net in kmv_optional_networks else 'FAIL', 'msg': n ~ ': ' ~ net ~ ' interface ' ~ iface ~ ' not found'}) -%}
+      {%-   else -%}
+      {%-     set problems = [] -%}
+      {%-     set flags = l.flags | default([]) -%}
+      {%-     if 'UP' not in flags or 'LOWER_UP' not in flags -%}{%- set _ = problems.append('not up (' ~ flags | join(',') ~ ')') -%}{%- endif -%}
+      {%-     set vid = cfg.vlan | default(0, true) | int -%}
+      {%-     if vid != 0 -%}
+      {%-       set kind = l.linkinfo.info_kind | default('none') -%}
+      {%-       set have = l.linkinfo.info_data.id | default('') | string -%}
+      {%-       if kind != 'vlan' or have != vid | string -%}
+      {%-         set _ = problems.append('expected VLAN ' ~ vid ~ ', found ' ~ kind ~ ((' id ' ~ have) if have else '')) -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-     if cfg.mtu | default('') and l.mtu | string != cfg.mtu | string -%}
+      {%-       set _ = problems.append('MTU ' ~ l.mtu ~ ', expected ' ~ cfg.mtu) -%}
+      {%-     endif -%}
+      {%-     set want = (kmv_addresses[net] | kmv_ip) ~ '/' ~ (kmv_addresses[net] | kmv_prefix(cfg.cidr)) -%}
+      {%-     set have_ips = kmv_n.addrs | kmv_ipv4(iface) -%}
+      {%-     if want not in have_ips -%}
+      {%-       set _ = problems.append('expected ' ~ want ~ ', has: ' ~ (have_ips | join(' ') if have_ips else 'no IPv4')) -%}
+      {%-     endif -%}
+      {%-     if problems -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ net ~ ' (' ~ iface ~ '): ' ~ (problems | kmv_joinc)}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': n ~ ': ' ~ net ~ ' ' ~ iface ~ ' VLAN ' ~ (vid if vid else 'none') ~ ' MTU ' ~ l.mtu
+                                  ~ ' ' ~ want ~ ' (on ' ~ l.link | default('-', true) ~ ')'}) -%}
+      {%-       set extra = have_ips | difference([want]) -%}
+      {%-       if extra -%}{%- set _ = v.append({'level': 'INFO', 'msg': n ~ ': ' ~ iface ~ ' also carries ' ~ extra | join(' ')}) -%}{%- endif -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- for net, cfg in (kmv_provider_networks | default({}, true)).items() -%}
+      {%-   set iface = cfg.interface -%}
+      {%-   set l = kmv_n.links | kmv_link(iface) -%}
+      {%-   if kmv_role == 'cp' -%}
+      {%-     if l -%}{%- set _ = v.append({'level': 'INFO', 'msg': n ~ ': provider interface ' ~ iface ~ ' present on a control plane (list it in excludeNodes unless intended)'}) -%}{%- endif -%}
+      {%-   elif not l and iface in auto_ifaces -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ': provider ' ~ net ~ ' interface ' ~ iface ~ ' not found: autoCreateVLANSubinterface is set, the kMetal networking daemon creates it'}) -%}
+      {%-   elif not l -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': n ~ ': provider ' ~ net ~ ' interface ' ~ iface ~ ' not found'}) -%}
+      {%-   else -%}
+      {%-     set problems = [] -%}
+      {%-     set flags = l.flags | default([]) -%}
+      {%-     if 'UP' not in flags or 'LOWER_UP' not in flags -%}{%- set _ = problems.append('not up (' ~ flags | join(',') ~ ')') -%}{%- endif -%}
+      {%-     set vid = cfg.vlan | default(0, true) | int -%}
+      {%-     if vid != 0 -%}
+      {%-       set kind = l.linkinfo.info_kind | default('none') -%}
+      {%-       set have = l.linkinfo.info_data.id | default('') | string -%}
+      {%-       if kind != 'vlan' or have != vid | string -%}
+      {%-         set _ = problems.append('expected VLAN ' ~ vid ~ ', found ' ~ kind ~ ((' id ' ~ have) if have else '')) -%}
+      {%-       endif -%}
+      {%-     endif -%}
+      {%-     set ips = kmv_n.addrs | kmv_ipv4(iface, false) -%}
+      {%-     if ips -%}{%- set _ = problems.append('carries IPv4 ' ~ ips | join(' ') ~ ': a provider interface must have no address') -%}{%- endif -%}
+      {%-     if problems -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ': provider ' ~ net ~ ' (' ~ iface ~ '): ' ~ (problems | kmv_joinc)}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': n ~ ': provider ' ~ net ~ ' ' ~ iface ~ ' VLAN ' ~ (vid if vid else 'none') ~ ' MTU ' ~ l.mtu ~ ', no IPv4'}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ v }}

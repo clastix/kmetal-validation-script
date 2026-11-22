@@ -1,0 +1,22 @@
+---
+# kubevirt: KubeVirt in system-kubevirt and CDI report phase Deployed.
+
+- name: kubevirt | Read the KubeVirt and CDI phases
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get kubevirt -n {{ kmv_ns_kubevirt }} -o jsonpath={.items[0].status.phase}
+    - kubectl get cdi -o jsonpath={.items[0].status.phase}
+  register: _kv_read
+  changed_when: false
+  failed_when: false
+
+- name: kubevirt | verdicts
+  kmv_record:
+    group: kubevirt
+    verdicts: >-
+      {%- set kv = _kv_read.results[0].stdout | default('') -%}
+      {%- set cdi = _kv_read.results[1].stdout | default('') -%}
+      {{ [{'level': 'PASS', 'msg': 'KubeVirt Deployed'} if kv == 'Deployed'
+           else {'level': 'FAIL', 'msg': 'KubeVirt phase ' ~ (kv or 'not found') ~ ' in ' ~ kmv_ns_kubevirt},
+          {'level': 'PASS', 'msg': 'CDI Deployed'} if cdi == 'Deployed'
+           else {'level': 'WARN', 'msg': 'CDI phase ' ~ (cdi or 'not found')}] }}

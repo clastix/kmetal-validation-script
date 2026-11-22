@@ -1,0 +1,37 @@
+---
+# Summary on localhost, last play of every playbook: gathers the verdicts every host
+# recorded with kmv_record, prints the counts and every FAIL and WARN, and fails the play
+# when there is at least one FAIL.
+
+- name: summary | collect the verdicts of every host
+  ansible.builtin.set_fact:
+    _kmv_all: >-
+      {%- set out = [] -%}
+      {%- for h in ['localhost'] + (groups['all'] | difference(['localhost'])) -%}
+      {%-   for v in hostvars[h]['ansible_facts']['kmv_results'] | default([]) -%}
+      {%-     set _ = out.append(v) -%}
+      {%-   endfor -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: summary | counts
+  ansible.builtin.set_fact:
+    _kmv_fails: "{{ _kmv_all | selectattr('level', 'eq', 'FAIL') | list }}"
+    _kmv_warns: "{{ _kmv_all | selectattr('level', 'eq', 'WARN') | list }}"
+    _kmv_passes: "{{ _kmv_all | selectattr('level', 'eq', 'PASS') | list }}"
+
+- name: summary
+  ansible.builtin.debug:
+    msg: >-
+      {%- set out = ['%d passed, %d warnings, %d failures' | format(_kmv_passes | length, _kmv_warns | length, _kmv_fails | length)] -%}
+      {%- for v in _kmv_fails -%}{%- set _ = out.append('FAIL [' ~ v.group ~ '] ' ~ v.msg) -%}{%- endfor -%}
+      {%- for v in _kmv_warns -%}{%- set _ = out.append('WARN [' ~ v.group ~ '] ' ~ v.msg) -%}{%- endfor -%}
+      {%- if kmv_keep | bool and kmv_created | default(false) -%}
+      {%-   set _ = out.append('Test resources kept. Remove them with: ansible-playbook -i <inventory> playbooks/cleanup.yml -e kmv_run_id=' ~ kmv_rid | default('?')) -%}
+      {%- endif -%}
+      {{ out }}
+
+- name: summary | result
+  ansible.builtin.fail:
+    msg: "{{ _kmv_fails | length }} check(s) failed"
+  when: _kmv_fails | length > 0 and kmv_summary_fail | bool

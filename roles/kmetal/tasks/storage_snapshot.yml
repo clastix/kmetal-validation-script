@@ -1,0 +1,111 @@
+---
+# Snapshot the platform-class volume pvc-uc, restore it into a new PVC and write to it.
+# A read-only restore is a FAIL when the StorageProfile clones by snapshot (tenant root
+# disks would fail), a WARN otherwise.
+
+- name: storage | Snapshot the platform-class PVC
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: snapshot.storage.k8s.io/v1
+      kind: VolumeSnapshot
+      metadata: {name: snap-uc, namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+      spec:
+        volumeSnapshotClassName: "{{ _st.vsc }}"
+        source: {persistentVolumeClaimName: pvc-uc}
+  register: _st_snap_apply
+  ignore_errors: true
+
+- name: storage | Wait for the snapshot to be ready (up to 5 min)
+  kubernetes.core.k8s_info:
+    api_version: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshot
+    name: snap-uc
+    namespace: "{{ kmv_test_ns }}"
+  register: _st_snap
+  until: _st_snap.resources[0].status.readyToUse | default(false)
+  retries: 100
+  delay: 3
+  failed_when: false
+  when: not (_st_snap_apply.failed | default(false))
+
+- name: storage | snapshot verdict
+  kmv_record:
+    group: storage
+    verdicts:
+      - "{{ {'level': 'PASS', 'msg': 'VolumeSnapshot of a ' ~ _st.uc ~ ' volume readyToUse (class ' ~ _st.vsc ~ ')'}
+            if _st_snap.resources[0].status.readyToUse | default(false) else
+            {'level': 'FAIL', 'msg': 'VolumeSnapshot of a ' ~ _st.uc ~ ' volume not readyToUse in 300s: '
+                                     ~ (_st_snap.resources[0].status.error.message | default('no error reported'))} }}"
+
+- name: storage | restore and write
+  when: _st_snap.resources[0].status.readyToUse | default(false)
+  block:
+    - name: storage | Restore the snapshot into a new PVC and start a pod that writes to it
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: List
+          items:
+            - apiVersion: v1
+              kind: PersistentVolumeClaim
+              metadata: {name: pvc-restore, namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+              spec:
+                accessModes: [ReadWriteOnce]
+                volumeMode: Filesystem
+                storageClassName: "{{ _st.uc }}"
+                resources: {requests: {storage: 1Gi}}
+                dataSource: {name: snap-uc, kind: VolumeSnapshot, apiGroup: snapshot.storage.k8s.io}
+            - apiVersion: v1
+              kind: Pod
+              metadata: {name: r-uc, namespace: "{{ kmv_test_ns }}", labels: "{{ {kmv_label_key: kmv_rid} }}"}
+              spec:
+                restartPolicy: Never
+                terminationGracePeriodSeconds: 1
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms: [{matchExpressions: [{key: "{{ kmv_compute_label }}", operator: Exists}]}]
+                containers:
+                  - name: c
+                    image: "{{ kmv_probe_image }}"
+                    command: [sh, -c, "grep -q kmetal-validate /data/probe && echo w > /data/written && sync && cat /data/written"]
+                    volumeMounts: [{name: d, mountPath: /data}]
+                volumes: [{name: d, persistentVolumeClaim: {claimName: pvc-restore}}]
+      failed_when: false
+
+    - name: storage | Wait for that pod (up to 5 min)
+      kubernetes.core.k8s_info:
+        kind: Pod
+        name: r-uc
+        namespace: "{{ kmv_test_ns }}"
+      register: _st_restore
+      until: (_st_restore.resources[0].status.phase | default('')) in ['Succeeded', 'Failed']
+      retries: 100
+      delay: 3
+      failed_when: false
+
+    - name: storage | diagnostics for r-uc
+      ansible.builtin.include_tasks:
+        file: pod_diag.yml
+        apply:
+          tags: [storage]
+      vars:
+        _diag_ns: "{{ kmv_test_ns }}"
+        _diag_pod: r-uc
+        _diag_pvc: pvc-restore
+      when: (_st_restore.resources[0].status.phase | default('')) != 'Succeeded'
+
+    - name: storage | restore verdict
+      kmv_record:
+        group: storage
+        verdicts: >-
+          {%- set msg = 'volume restored from a ' ~ _st.uc ~ ' snapshot is not usable (read or write failed)' -%}
+          {%- if (_st_restore.resources[0].status.phase | default('')) == 'Succeeded' -%}
+          {{ [{'level': 'PASS', 'msg': 'volume restored from the snapshot holds the data and is writable'}] }}
+          {%- elif _st.clone == 'snapshot' -%}
+          {{ [{'level': 'FAIL', 'msg': msg ~ '; StorageProfile cloneStrategy is snapshot, so tenant root disks would fail'}] }}
+          {%- else -%}
+          {{ [{'level': 'WARN', 'msg': msg ~ '; tenant root disks are cloned with cloneStrategy ' ~ (_st.clone or 'default')}] }}
+          {%- endif -%}

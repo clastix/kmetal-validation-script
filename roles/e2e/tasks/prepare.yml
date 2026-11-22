@@ -1,0 +1,57 @@
+---
+# Resolves what the end-to-end tests need: the tenant group of spec.multiTenancy.users
+# (Group system:serviceaccounts:<namespace>), the ClusterClass, the Kubernetes version and
+# its golden image. Sets _e2e_ready.
+
+- name: e2e prepare | remember what is already resolved
+  ansible.builtin.set_fact:
+    _e2e_need_images: "{{ kmv_tags is not defined }}"
+    _e2e_need_cc: "{{ kmv_cc is not defined }}"
+
+- name: e2e prepare | golden images
+  ansible.builtin.import_role:
+    name: kmetal
+    tasks_from: resolve_images
+  when: _e2e_need_images
+
+- name: e2e prepare | ClusterClass
+  ansible.builtin.import_role:
+    name: kmetal
+    tasks_from: resolve_cc
+  when: _e2e_need_cc
+
+- name: e2e prepare | resolve
+  ansible.builtin.set_fact:
+    _e2e_group: >-
+      {{ (kmv_km.spec.multiTenancy.users | default([], true) | selectattr('kind', 'eq', 'Group')
+          | selectattr('name', 'match', '^system:serviceaccounts:') | map(attribute='name') | first) | default('') }}
+    _e2e_tag: "{{ kmv_e2e_k8s_version or (kmv_tags | first | default('')) }}"
+    _e2e_tk_node: "{{ kmv_tenant_kubectl_node or ((groups['control_plane'] | default([])) | first | default('')) }}"
+
+- name: e2e prepare | verdict
+  kmv_record:
+    group: e2e
+    verdicts: >-
+      {%- set a = kmv_artifacts[_e2e_tag] | default({}) if _e2e_tag else {} -%}
+      {%- if not kmv_km -%}
+      {{ [{'level': 'FAIL', 'msg': 'no KMetal resource'}] }}
+      {%- elif not _e2e_group -%}
+      {%-   set desc = [] -%}{%- for u in kmv_km.spec.multiTenancy.users | default([], true) -%}{%- set _ = desc.append(u.kind ~ ':' ~ u.name) -%}{%- endfor -%}
+      {{ [{'level': 'FAIL', 'msg': 'e2e needs a multiTenancy Group system:serviceaccounts:<namespace>; found: ' ~ desc | join(' ')}] }}
+      {%- elif not kmv_cc -%}
+      {{ [{'level': 'FAIL', 'msg': 'no usable ClusterClass in ' ~ kmv_ns_capi ~ ' for e2e (kmv_e2e_clusterclass=' ~ (kmv_e2e_clusterclass or 'auto') ~ ')'}] }}
+      {%- elif not _e2e_tag -%}
+      {{ [{'level': 'FAIL', 'msg': 'no Kubernetes version: osArtifact.tags is empty and kmv_e2e_k8s_version unset'}] }}
+      {%- elif _e2e_tag not in kmv_tags -%}
+      {{ [{'level': 'FAIL', 'msg': 'kmv_e2e_k8s_version ' ~ _e2e_tag ~ ' is not in osArtifact.tags (' ~ kmv_tags | join(' ') ~ ')'}] }}
+      {%- elif not a or a.phase != 'Ready' or a.golden != 'Bound' -%}
+      {{ [{'level': 'FAIL', 'msg': 'image for ' ~ _e2e_tag ~ ' not usable: OSArtifact ' ~ a.name | default('missing') ~ ' ' ~ a.phase | default('') ~ ', golden ' ~ a.golden | default('')}] }}
+      {%- else -%}
+      {{ [{'level': 'PASS', 'msg': 'e2e: run ' ~ kmv_rid ~ ', ClusterClass ' ~ kmv_cc ~ ', Kubernetes ' ~ _e2e_tag ~ ', OSArtifact ' ~ a.name ~ ', tenant group ' ~ _e2e_group}] }}
+      {%- endif -%}
+
+- name: e2e prepare | ready
+  ansible.builtin.set_fact:
+    _e2e_ready: "{{ (ansible_facts.kmv_results | last).level == 'PASS' }}"
+    _e2e_sa_ns: "{{ _e2e_group | regex_replace('^system:serviceaccounts:', '') }}"
+    _e2e_artifact: "{{ (kmv_artifacts[_e2e_tag] | default({})).name | default('') }}"

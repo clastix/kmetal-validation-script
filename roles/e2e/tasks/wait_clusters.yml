@@ -1,0 +1,62 @@
+---
+# Waits for every applied tenant cluster together, up to kmv_timeout_cluster: a Cluster is
+# up when its Available (or Ready) condition is True and its worker Machines are Running.
+# Sets _e2e_up (the keys that came up).
+
+- name: e2e clusters | Wait for the tenant clusters {{ _e2e_applied | join(', ') }} to come up (up to {{ kmv_timeout_cluster }}; the long part)
+  ansible.builtin.shell: |
+    kubectl get clusters.cluster.x-k8s.io -A -l {{ kmv_label_key }}={{ kmv_rid }} -o json
+    echo '---'
+    kubectl get machines.cluster.x-k8s.io -A -o json
+  register: _wc
+  until: (_wc.stdout | kmv_clusters_up(_e2e_envs, _e2e_applied) | length) == (_e2e_applied | length)
+  retries: "{{ ((kmv_timeout_cluster | kmv_seconds) / 15) | int }}"
+  delay: 15
+  changed_when: false
+  failed_when: false
+
+- name: e2e clusters | result
+  ansible.builtin.set_fact:
+    _e2e_up: "{{ _wc.stdout | default('') | kmv_clusters_up(_e2e_envs, _e2e_applied) }}"
+
+- name: e2e clusters | Collect the machines, VMIs and events of each cluster that did not come up  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
+  ansible.builtin.shell: |
+    kubectl get cluster,kamajicontrolplane,machines,vmi -n {{ _e2e_envs[item].ns }} 2>&1
+    kubectl get events -n {{ _e2e_envs[item].ns }} --sort-by=.lastTimestamp 2>/dev/null | tail -n 10
+  loop: "{{ _e2e_applied | reject('in', _e2e_up) | list }}"
+  register: _wc_diag
+  changed_when: false
+  failed_when: false
+
+- name: e2e clusters | diagnostics output
+  ansible.builtin.debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ _wc_diag.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: e2e clusters | verdicts (e2e)
+  kmv_record:
+    group: e2e
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- for k in _e2e_applied if k in ['a', 'b'] -%}
+      {%-   set e = _e2e_envs[k] -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ' available, ' ~ e.workers ~ ' machine(s) Running'} if k in _e2e_up
+                            else {'level': 'FAIL', 'msg': 'Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ' not available in ' ~ kmv_timeout_cluster}) -%}
+      {%- endfor -%}
+      {{ v }}
+  when: _e2e_applied | select('in', ['a', 'b']) | list | length > 0
+
+- name: e2e clusters | verdicts (e2e-tenants)
+  kmv_record:
+    group: e2e-tenants
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- for k in _e2e_applied if k in ['t1', 't2'] -%}
+      {%-   set e = _e2e_envs[k] -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ' available, ' ~ e.workers ~ ' machine(s) Running'} if k in _e2e_up
+                            else {'level': 'FAIL', 'msg': 'Cluster ' ~ e.ns ~ '/' ~ e.cluster ~ ' not available in ' ~ kmv_timeout_cluster}) -%}
+      {%- endfor -%}
+      {{ v }}
+  when: _e2e_applied | select('in', ['t1', 't2']) | list | length > 0

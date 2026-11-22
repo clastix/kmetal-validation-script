@@ -1,0 +1,36 @@
+---
+# Environments _k1 and _k2 run in the same CIDR: show both worker address sets, then probe
+# traffic isolation both ways.
+
+- name: overlap | worker addresses
+  ansible.builtin.include_tasks:
+    file: worker_ips.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: ["{{ _k1 }}", "{{ _k2 }}"]
+  loop_control:
+    loop_var: _wk
+
+- name: overlap | verdicts
+  kmv_record:
+    group: "{{ _e2e_envs[_k1].group }}"
+    verdicts: >-
+      {%- set i1, i2 = _e2e_ips[_k1] | default([]), _e2e_ips[_k2] | default([]) -%}
+      {%- set common = i1 | intersect(i2) -%}
+      {{ [{'level': 'INFO', 'msg': _e2e_envs[_k1].cluster ~ ' workers: ' ~ i1 | join(' ')},
+          {'level': 'INFO', 'msg': _e2e_envs[_k2].cluster ~ ' workers: ' ~ i2 | join(' ')},
+          {'level': 'PASS', 'msg': 'the same worker addresses (' ~ common | join(' ') ~ ') live in ' ~ _e2e_envs[_k1].ns ~ ' and ' ~ _e2e_envs[_k2].ns ~ ': overlapping CIDRs coexist'}
+            if common else
+          {'level': 'PASS', 'msg': _e2e_envs[_k1].cluster ~ ' and ' ~ _e2e_envs[_k2].cluster ~ ' both run in ' ~ kmv_e2e_subnet_cidr ~ ', in separate VPCs'}] }}
+
+- name: overlap | isolation both ways
+  ansible.builtin.include_tasks:
+    file: isolation.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [["{{ _k1 }}", "{{ _k2 }}"], ["{{ _k2 }}", "{{ _k1 }}"]]
+  loop_control:
+    loop_var: _pair
+  vars:
+    _src: "{{ _pair[0] }}"
+    _dst: "{{ _pair[1] }}"

@@ -1,0 +1,89 @@
+---
+# encap: geneve, vxlan and openvswitch must be loaded or loadable; then a real tunnel
+# (kubeOVN.tunnelType, default geneve) between the first two nodes with an overlay address,
+# on UDP kmv_encap_test_port, carries a ping across 169.254.250.0/30. The test device
+# kvtest0 is always deleted.
+
+- name: encap | kernel modules
+  kmv_record:
+    group: encap
+    verdicts: >-
+      {%- set n = inventory_hostname -%}
+      {%- set tt = hostvars['localhost'].kmv_tunnel_type | default('geneve') -%}
+      {%- set missing = [] -%}
+      {%- for m in ['geneve', 'vxlan', 'openvswitch'] if kmv_n.misc['mod_' ~ m] | default('0') != '1' -%}{%- set _ = missing.append(m) -%}{%- endfor -%}
+      {%- if not missing -%}
+      {{ [{'level': 'PASS', 'msg': n ~ ': kernel modules geneve, vxlan, openvswitch available'}] }}
+      {%- elif 'overlay' not in kmv_addresses -%}
+      {{ [{'level': 'INFO', 'msg': n ~ ': modules not available: ' ~ missing | join(' ') ~ ' (no overlay on this node)'}] }}
+      {%- elif tt in missing or 'openvswitch' in missing -%}
+      {{ [{'level': 'FAIL', 'msg': n ~ ': kernel modules not available: ' ~ missing | join(' ')}] }}
+      {%- else -%}
+      {{ [{'level': 'WARN', 'msg': n ~ ': kernel modules not available: ' ~ missing | join(' ')}] }}
+      {%- endif -%}
+
+- name: encap | pick the two tunnel ends
+  ansible.builtin.set_fact:
+    _uc_pair: >-
+      {%- set out = [] -%}
+      {%- for h in ansible_play_hosts if hostvars[h].kmv_n is defined and 'overlay' in hostvars[h].kmv_addresses | default({}) -%}
+      {%-   set _ = out.append(h) -%}
+      {%- endfor -%}
+      {{ out[:2] }}
+    _uc_tt: "{{ hostvars['localhost'].kmv_tunnel_type | default('geneve') }}"
+
+- name: encap | tunnel test skipped
+  kmv_record:
+    group: encap
+    verdicts:
+      - level: INFO
+        msg: "fewer than two nodes with an overlay address: tunnel test skipped"
+  when: _uc_pair | length < 2 and inventory_hostname == ansible_play_hosts[0]
+
+- name: encap | tunnel test
+  when: _uc_pair | length == 2 and inventory_hostname in _uc_pair
+  vars:
+    _peer: "{{ _uc_pair[1] if inventory_hostname == _uc_pair[0] else _uc_pair[0] }}"
+    _peer_ip: "{{ hostvars[_peer].kmv_addresses.overlay | kmv_ip }}"
+    _my_ip: "{{ kmv_addresses.overlay | kmv_ip }}"
+    _local: "{{ '169.254.250.1/30' if inventory_hostname == _uc_pair[0] else '169.254.250.2/30' }}"
+    _port: "{{ kmv_encap_test_port | int + (1 if _uc_tt == 'vxlan' else 0) }}"
+    _extra: "{{ ('dstport ' ~ _port ~ ' dev ' ~ kmv_networks.overlay.interface) if _uc_tt == 'vxlan' else ('dstport ' ~ _port) }}"
+  block:
+    - name: encap | Create the test tunnel kvtest0 on both nodes (deleted right after)
+      ansible.builtin.shell: >-
+        ip link del kvtest0 2>/dev/null;
+        ip link add kvtest0 type {{ _uc_tt }} id 4242 remote {{ _peer_ip }} {{ _extra }}
+        && ip addr add {{ _local }} dev kvtest0 && ip link set kvtest0 up
+      register: _uc_mk
+      changed_when: true
+      failed_when: false
+
+    - name: encap | Ping across the tunnel
+      ansible.builtin.command: ping -c3 -i0.2 -W1 -q 169.254.250.2
+      register: _uc_ping
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == _uc_pair[0]
+
+    - name: encap | tunnel verdict
+      kmv_record:
+        group: encap
+        verdicts: >-
+          {%- set a, b = _uc_pair[0], _uc_pair[1] -%}
+          {%- set what = _uc_tt ~ ' tunnel ' ~ a ~ ' (' ~ _my_ip ~ ') <-> ' ~ b ~ ' (' ~ _peer_ip ~ ') on UDP ' ~ _port -%}
+          {%- set mk_err = (_uc_pair | map('extract', hostvars, ['_uc_mk']) | selectattr('rc', 'ne', 0) | map(attribute='stderr') | list) -%}
+          {%- if mk_err -%}
+          {{ [{'level': 'FAIL', 'msg': 'cannot create a ' ~ _uc_tt ~ ' test device between ' ~ a ~ ' and ' ~ b ~ ': ' ~ mk_err | join('; ') | truncate(200)}] }}
+          {%- elif _uc_ping.rc == 0 -%}
+          {{ [{'level': 'PASS', 'msg': what ~ ' carries traffic'}] }}
+          {%- else -%}
+          {{ [{'level': 'FAIL', 'msg': what ~ ': no traffic (firewall or overlay routing)'}] }}
+          {%- endif -%}
+      when: inventory_hostname == _uc_pair[0]
+
+  always:
+    - name: encap | Delete kvtest0
+      ansible.builtin.command: ip link del kvtest0
+      changed_when: true
+      failed_when: false

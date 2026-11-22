@@ -1,0 +1,65 @@
+---
+# Scenario e2e-tenants, setup: tenants kv-<id>-t1 and kv-<id>-t2, one environment each with
+# a VpcClaim and a SubnetClaim on the SAME CIDR, the permission probes both ways, then one
+# Cluster per tenant.
+
+- name: e2e-tenants | environments t1 and t2
+  ansible.builtin.set_fact:
+    _e2e_envs: >-
+      {{ _e2e_envs | combine({
+           't1': {'tenant': 'kv-' ~ kmv_rid ~ '-t1', 'ns': 'kv-' ~ kmv_rid ~ '-t1-env', 'cluster': 'kv-' ~ kmv_rid ~ '-t1', 'workers': kmv_e2e_tenant1_workers | int, 'group': 'e2e-tenants'},
+           't2': {'tenant': 'kv-' ~ kmv_rid ~ '-t2', 'ns': 'kv-' ~ kmv_rid ~ '-t2-env', 'cluster': 'kv-' ~ kmv_rid ~ '-t2', 'workers': kmv_e2e_tenant2_workers | int, 'group': 'e2e-tenants'}}) }}
+
+- name: e2e-tenants | tenants
+  ansible.builtin.include_tasks:
+    file: tenant.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: ["kv-{{ kmv_rid }}-t1", "kv-{{ kmv_rid }}-t2"]
+  loop_control:
+    loop_var: _t
+  vars:
+    _grp: e2e-tenants
+
+- name: e2e-tenants | environments
+  ansible.builtin.include_tasks:
+    file: env.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [t1, t2]
+  loop_control:
+    loop_var: key
+  when: _e2e_tenant_ok[_e2e_envs[key].tenant] | default(false)
+
+- name: e2e-tenants | permissions across tenants
+  ansible.builtin.include_tasks:
+    file: rbac.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [[t1, t2], [t2, t1]]
+  loop_control:
+    loop_var: _pair
+  vars:
+    _src: "{{ _pair[0] }}"
+    _dst: "{{ _pair[1] }}"
+  when: _e2e_ok.t1 | default(false) and _e2e_ok.t2 | default(false)
+
+- name: e2e-tenants | overlapping subnets
+  ansible.builtin.include_tasks:
+    file: subnets.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  vars:
+    _k1: t1
+    _k2: t2
+  when: _e2e_ok.t1 | default(false) and _e2e_ok.t2 | default(false)
+
+- name: e2e-tenants | clusters
+  ansible.builtin.include_tasks:
+    file: cluster_apply.yml
+    apply:
+      tags: [e2e, e2e-tenants]
+  loop: [t1, t2]
+  loop_control:
+    loop_var: key
+  when: _e2e_ok.t1 | default(false) and _e2e_ok.t2 | default(false)

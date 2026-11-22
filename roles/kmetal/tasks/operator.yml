@@ -1,0 +1,126 @@
+---
+# operator: the kmetal-operator Helm release in kmetal-operator-system or kmetal-flux (or,
+# for a GitOps install, the Flux HelmRelease object in kmetal-flux), its chart version against
+# the validated kMetal release, its pods, the Flux objects in kmetal-flux and pods anywhere in
+# the cluster.
+
+- name: operator | Read the Helm releases in {{ kmv_operator_namespace }} and {{ kmv_ns_flux }}, and the Flux HelmReleases
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    # Every release state, with flags both Helm 3 and Helm 4 accept (Helm 4 dropped -a/--all).
+    - helm list -n {{ kmv_operator_namespace }} --deployed --failed --pending --superseded --uninstalling -o json
+    - helm list -n {{ kmv_ns_flux }} --deployed --failed --pending --superseded --uninstalling -o json
+    - kubectl get helmreleases.helm.toolkit.fluxcd.io -n {{ kmv_ns_flux }} -o json
+  register: _op_read
+  changed_when: false
+  failed_when: false
+
+- name: operator | locate the operator
+  ansible.builtin.set_fact:
+    _op: >-
+      {%- set rels = [] -%}
+      {%- for r in _op_read.results[:2] if r.rc == 0 -%}
+      {%-   for x in r.stdout | default('[]', true) | from_json -%}{%- set _ = rels.append(x) -%}{%- endfor -%}
+      {%- endfor -%}
+      {%- set rel = {} -%}
+      {#- the operator namespace is listed first: a release named kmetal-operator, named
+          <namespace>-kmetal-operator (Flux helm-controller naming), or of the kmetal-operator chart -#}
+      {%- for x in rels if not rel and (x.name == kmv_operator_release or x.name.endswith('-' ~ kmv_operator_release)
+                                         or x.chart is match('^' ~ (kmv_operator_chart | regex_escape) ~ '-v?[0-9]')) -%}
+      {%-   set _ = rel.update(x) -%}
+      {%- endfor -%}
+      {%- set hrs = (_op_read.results[2].stdout | from_json)['items'] if _op_read.results[2].rc == 0 else [] -%}
+      {%- set hr = {} -%}
+      {%- for h in hrs if not hr and (h.metadata.name == kmv_operator_release or h.spec.releaseName | default('') == kmv_operator_release
+                                        or h.spec.chart.spec.chart | default('') == kmv_operator_chart) -%}
+      {%-   set _ = hr.update(h) -%}
+      {%- endfor -%}
+      {%- if rel -%}
+      {{ {'how': 'helm', 'name': rel.name, 'status': rel.status, 'chart': rel.chart, 'ns': rel.namespace,
+          'version': rel.chart | regex_replace('^' ~ (kmv_operator_chart | regex_escape) ~ '-', '')} }}
+      {%- elif hr -%}
+      {{ {'how': 'flux', 'name': hr.metadata.name, 'ready': hr | kmv_condition('Ready') or 'Unknown',
+          'ns': hr.spec.targetNamespace | default(hr.metadata.namespace),
+          'version': (hr.status.history | default([{}], true) | first).chartVersion | default(hr.status.lastAttemptedRevision | default(hr.spec.chart.spec.version | default(''))) } }}
+      {%- else -%}
+      {{ {'how': 'none', 'ns': kmv_operator_namespace, 'version': ''} }}
+      {%- endif -%}
+
+- name: operator | Read the operator pods, every Flux object in {{ kmv_ns_flux }} and every pod of the cluster
+  ansible.builtin.command: "{{ item }}"
+  loop:
+    - kubectl get pods -n {{ _op.ns }} -o json
+    - kubectl get helmreleases.helm.toolkit.fluxcd.io -n {{ kmv_ns_flux }} -o json
+    - kubectl get kustomizations.kustomize.toolkit.fluxcd.io -n {{ kmv_ns_flux }} -o json
+    - kubectl get ocirepositories.source.toolkit.fluxcd.io -n {{ kmv_ns_flux }} -o json
+    - kubectl get pods -A -o json
+  register: _op_more
+  changed_when: false
+  failed_when: false
+
+- name: operator | verdicts
+  kmv_record:
+    group: operator
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- set t = kmv_target_kmetal -%}
+      {%- if _op.how == 'helm' -%}
+      {%-   set _ = v.append({'level': 'PASS' if _op.status == 'deployed' else 'FAIL',
+                            'msg': 'helm release ' ~ _op.ns ~ '/' ~ _op.name ~ ' is ' ~ _op.status ~ ' (' ~ _op.chart ~ ')'}) -%}
+      {%- elif _op.how == 'flux' -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'operator installed by Flux: HelmRelease ' ~ kmv_ns_flux ~ '/' ~ _op.name
+                              ~ ' (Ready=' ~ _op.ready ~ ', target namespace ' ~ _op.ns ~ ')'}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'operator not found: no helm release of chart ' ~ kmv_operator_chart ~ ' in ' ~ kmv_operator_namespace
+                              ~ ' or ' ~ kmv_ns_flux ~ ', no HelmRelease ' ~ kmv_operator_release ~ ' in ' ~ kmv_ns_flux}) -%}
+      {%- endif -%}
+      {%- if _op.how != 'none' -%}
+      {%-   set ver = _op.version | regex_replace('^v', '') -%}
+      {%-   set st = ver | kmv_version_status(t) -%}
+      {%-   if not ver -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'operator chart version unknown; these playbooks validate kMetal ' ~ t}) -%}
+      {%-   elif st == 'match' -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'operator chart ' ~ ver ~ ' matches the validated kMetal ' ~ t}) -%}
+      {%-   elif st == 'prerelease' -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'operator chart ' ~ ver ~ ' is a pre-release of the validated kMetal ' ~ t}) -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': 'operator chart ' ~ ver ~ ' is a pre-release; the final ' ~ t ~ ' release is the validated one'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'operator chart is ' ~ ver ~ '; these playbooks validate kMetal ' ~ t}) -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {%- set opods = (_op_more.results[0].stdout | from_json)['items'] if _op_more.results[0].rc == 0 else [] -%}
+      {%- set bad = [] -%}
+      {%- for p in opods if not (p | kmv_pod_ok) -%}{%- set _ = bad.append(p.metadata.name ~ ' ' ~ p.status.phase | default('?')) -%}{%- endfor -%}
+      {%- if bad -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'operator pods not ready: ' ~ bad | join(', ')}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'operator pods Running in ' ~ _op.ns}) -%}
+      {%- endif -%}
+      {%- for r in _op_more.results[1:4] -%}
+      {%-   set kind = r.item.split(' ')[2].split('.')[0] -%}
+      {%-   if r.rc != 0 -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': kind ~ ' not served'}) -%}
+      {%-   else -%}
+      {%-     set items = (r.stdout | from_json)['items'] -%}
+      {%-     set nb = [] -%}
+      {%-     for o in items if (o | kmv_condition('Ready')) != 'True' -%}
+      {%-       set _ = nb.append(o.metadata.name ~ ': ' ~ ((o | kmv_condition_message('Ready')) or 'no Ready condition')) -%}
+      {%-     endfor -%}
+      {%-     if nb -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': nb | length ~ ' of ' ~ items | length ~ ' ' ~ kind ~ ' not Ready in ' ~ kmv_ns_flux ~ ': ' ~ (nb[:10] | join('; '))}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': items | length ~ ' ' ~ kind ~ ' Ready in ' ~ kmv_ns_flux}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {%- set allpods = (_op_more.results[4].stdout | from_json)['items'] if _op_more.results[4].rc == 0 else [] -%}
+      {%- set nok = [] -%}
+      {%- for p in allpods if not (p.metadata.namespace.startswith('kmetal-validate-') or p.metadata.namespace.startswith('kv-' ~ kmv_rid)) and not (p | kmv_pod_ok) -%}
+      {%-   set _ = nok.append(p.metadata.namespace ~ '/' ~ p.metadata.name ~ ' ' ~ p.status.phase | default('?')) -%}
+      {%- endfor -%}
+      {%- if nok -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': nok | length ~ ' pods outside Running/Completed: ' ~ (nok[:15] | join(', '))}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'no pod outside Running/Completed in the cluster'}) -%}
+      {%- endif -%}
+      {{ v }}

@@ -1,0 +1,60 @@
+---
+# What each check group tests. Contacts nothing.
+#
+#   ansible-playbook playbooks/help.yml                                  # playbooks and usage
+#   ansible-playbook playbooks/help.yml -e cmd=undercluster              # undercluster groups
+#   ansible-playbook playbooks/help.yml -e cmd=kmetal -e group=nodes     # one group in detail
+
+- name: Help
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - ../roles/common/vars/help.yml
+  vars:
+    cmd: ""
+    group: ""
+  tasks:
+    - name: Usage
+      ansible.builtin.debug:
+        msg:
+          - "kmetal-validate - validation of a kMetal 1.0.1 under cluster and platform"
+          - ""
+          - "  ansible-playbook -i inventory/<site> playbooks/check-env.yml      validate the inventory, contact nothing"
+          - "  ansible-playbook -i inventory/<site> playbooks/undercluster.yml   node checks over SSH"
+          - "  ansible-playbook -i inventory/<site> playbooks/kmetal.yml         platform checks and end-to-end tests"
+          - "  ansible-playbook -i inventory/<site> playbooks/site.yml           both"
+          - "  ansible-playbook -i inventory/<site> playbooks/cleanup.yml -e kmv_run_id=ID"
+          - ""
+          - "  --tags g1,g2 / --skip-tags g1,g2   run or skip check groups"
+          - "  -e kmv_kubeconfig=FILE  -e kmv_keep=true  -e kmv_force_e2e=true  -e kmv_timeout_cluster=45m"
+          - ""
+          - "Check groups: ansible-playbook playbooks/help.yml -e cmd=undercluster | -e cmd=kmetal"
+      when: cmd | length == 0
+
+    - name: Unknown command
+      ansible.builtin.fail:
+        msg: "unknown cmd '{{ cmd }}'; use undercluster or kmetal"
+      when: cmd | length > 0 and cmd not in kmv_help_groups
+
+    - name: Groups of {{ cmd }}
+      ansible.builtin.debug:
+        msg: >-
+          {%- set out = [kmv_help_commands[cmd], '', 'Check groups (tags), in execution order:'] -%}
+          {%- for g in kmv_help_groups[cmd] -%}
+          {%-   set _ = out.append('  %-13s %s' | format(g, kmv_help[cmd ~ ':' ~ g].splitlines()[0].split(' - ', 1)[1])) -%}
+          {%- endfor -%}
+          {%- set _ = out.append('') -%}
+          {%- set _ = out.append('Details: ansible-playbook playbooks/help.yml -e cmd=' ~ cmd ~ ' -e group=<group>') -%}
+          {%- set _ = out.append('Select:  --tags g1,g2 | --skip-tags g1,g2') -%}
+          {{ out }}
+      when: cmd in kmv_help_groups and group | length == 0
+
+    - name: Unknown group
+      ansible.builtin.fail:
+        msg: "unknown {{ cmd }} check group '{{ group }}'; groups: {{ kmv_help_groups[cmd] | join(' ') }}"
+      when: cmd in kmv_help_groups and group | length > 0 and group not in kmv_help_groups[cmd]
+
+    - name: Group {{ group }}
+      ansible.builtin.debug:
+        msg: "{{ kmv_help[cmd ~ ':' ~ group].rstrip().splitlines() }}"
+      when: cmd in kmv_help_groups and group in kmv_help_groups[cmd]

@@ -1,0 +1,21 @@
+---
+# ansible-lint configuration. Run: ansible-lint --offline
+exclude_paths:
+  - .venv/
+  - collections/
+  - inventory/poc/
+
+skip_list:
+  # Task names follow "<check group> | <step>" in lower case, matching the tags and the
+  # verdict groups in the output.
+  - name[casing]
+  # Names carry the item or environment being processed ("env {{ key }} | ...").
+  - name[template]
+  # Shared variables use the project prefix kmv_ (they cross roles: common, undercluster,
+  # kmetal, e2e, cleanup); role-local temporaries start with an underscore.
+  - var-naming[no-role-prefix]
+  # Verdict templates build one message per line of Jinja; wrapping them hurts reading.
+  - yaml[line-length]
+
+warn_list:
+  - jinja[spacing]

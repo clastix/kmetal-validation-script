@@ -1,0 +1,79 @@
+---
+# tenancy: spec.multiTenancy.users is set and a CapsuleConfiguration exists. Probe: create a
+# namespace while impersonating a member of the first subject who owns no Tenant; Capsule
+# must reject it. The probe namespace is deleted right away.
+
+- name: tenancy | Read the CapsuleConfigurations
+  ansible.builtin.command: kubectl get capsuleconfigurations -o json
+  register: _tn_cc
+  changed_when: false
+  failed_when: false
+
+- name: tenancy | impersonation arguments
+  ansible.builtin.set_fact:
+    _tn_users: "{{ kmv_km.spec.multiTenancy.users | default([], true) }}"
+    _tn_probe: "kmetal-validate-probe-{{ kmv_rid }}"
+    _tn_as: >-
+      {%- set u = (kmv_km.spec.multiTenancy.users | default([], true) | first) | default({}) -%}
+      {%- if u.kind | default('') == 'Group' -%}
+      {%-   set user = ('system:serviceaccount:' ~ u.name[('system:serviceaccounts:' | length):] ~ ':kmetal-validate-probe')
+                       if u.name.startswith('system:serviceaccounts:') else 'kmetal-validate-probe' -%}
+      {{ ['--as=' ~ user, '--as-group=' ~ u.name, '--as-group=system:authenticated'] }}
+      {%- elif u.kind | default('') in ['User', 'ServiceAccount'] -%}
+      {{ ['--as=' ~ u.name] }}
+      {%- else -%}
+      {{ [] }}
+      {%- endif -%}
+
+- name: tenancy | Try to create a namespace as a tenant member who owns no Tenant (Capsule must refuse)
+  ansible.builtin.command:
+    argv: "{{ ['kubectl', 'create', 'namespace', _tn_probe] + _tn_as }}"
+  register: _tn_create
+  changed_when: _tn_create.rc == 0
+  failed_when: false
+  when: _tn_as | length > 0
+
+- name: tenancy | Read the probe namespace's tenant label
+  ansible.builtin.command: kubectl get namespace {{ _tn_probe }} -o json
+  register: _tn_ns
+  changed_when: false
+  failed_when: false
+  when: _tn_create.rc | default(1) == 0
+
+- name: tenancy | Delete the probe namespace
+  ansible.builtin.command: kubectl delete namespace {{ _tn_probe }} --ignore-not-found --wait=false
+  changed_when: true
+  failed_when: false
+  when: _tn_create.rc | default(1) == 0
+
+- name: tenancy | verdicts
+  kmv_record:
+    group: tenancy
+    verdicts: >-
+      {%- set v = [] -%}
+      {%- set desc = [] -%}
+      {%- for u in _tn_users -%}{%- set _ = desc.append(u.kind ~ ':' ~ u.name) -%}{%- endfor -%}
+      {%- if not _tn_users -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': 'spec.multiTenancy.users is empty: tenancy installed but inactive'}) -%}
+      {%- else -%}
+      {%-   set _ = v.append({'level': 'PASS', 'msg': 'multiTenancy users: ' ~ desc | join(' ')}) -%}
+      {%- endif -%}
+      {%- set ccs = ((_tn_cc.stdout | from_json)['items'] if _tn_cc.rc == 0 else []) | map(attribute='metadata.name') | list -%}
+      {%- set _ = v.append({'level': 'PASS', 'msg': 'CapsuleConfiguration: ' ~ ccs | join(' ')} if ccs else {'level': 'FAIL', 'msg': 'no CapsuleConfiguration'}) -%}
+      {%- if _tn_users -%}
+      {%-   set first = desc[0] -%}
+      {%-   if not _tn_as -%}
+      {%-     set _ = v.append({'level': 'INFO', 'msg': 'multiTenancy user kind ' ~ _tn_users[0].kind ~ ': probe skipped'}) -%}
+      {%-   elif _tn_create.rc != 0 -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'Capsule admission rejected a namespace for a ' ~ first ~ ' member owning no Tenant: '
+                                ~ (_tn_create.stderr_lines | default([]))[:2] | join(' ') | truncate(200)}) -%}
+      {%-   else -%}
+      {%-     set t = ((_tn_ns.stdout | default('{}') | from_json).metadata.labels | default({}))['capsule.clastix.io/tenant'] | default('') -%}
+      {%-     if t -%}
+      {%-       set _ = v.append({'level': 'INFO', 'msg': 'namespace created and assigned to tenant ' ~ t}) -%}
+      {%-     else -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'a ' ~ first ~ ' member created a namespace with no capsule.clastix.io/tenant label: Capsule does not know that subject'}) -%}
+      {%-     endif -%}
+      {%-   endif -%}
+      {%- endif -%}
+      {{ v }}
