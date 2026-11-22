@@ -10,7 +10,7 @@
   ansible.builtin.set_fact:
     _tk: "{{ ['kubectl', '--kubeconfig', _e2e_tk[key].kc] }}"
 
-- name: inside {{ key }} | wait for {{ _e2e_envs[key].workers }} Ready node(s)
+- name: inside {{ key }} | Wait for {{ _e2e_envs[key].workers }} Ready node(s) in the tenant cluster (up to 15 min)
   ansible.builtin.command:
     argv: "{{ _tk + ['get', 'nodes', '-o', 'json'] }}"
   delegate_to: "{{ _e2e_tk[key].host }}"
@@ -32,10 +32,18 @@
          | map(attribute='status.conditions') | map('selectattr', 'type', 'eq', 'Ready') | map('selectattr', 'status', 'eq', 'True')
          | map('list') | select | list | length) >= _e2e_envs[key].workers }}
 
+- name: inside {{ key }} | nodes Ready
+  kmv_record:
+    group: "{{ _e2e_envs[key].group }}"
+    verdicts:
+      - level: PASS
+        msg: "{{ _e2e_envs[key].cluster }}: {{ _e2e_envs[key].workers }} node(s) Ready"
+  when: _in_ready
+
 - name: inside {{ key }} | nodes not Ready
   when: not _in_ready
   block:
-    - name: inside {{ key }} | diagnostics
+    - name: inside {{ key }} | Read the Sveltos ClusterSummaries (CNI delivery), for the diagnosis
       ansible.builtin.shell: |
         kubectl get clustersummaries -n {{ _e2e_envs[key].ns }} 2>&1
       register: _in_diag
@@ -54,7 +62,7 @@
 - name: inside {{ key }} | workloads
   when: _in_ready
   block:
-    - name: inside {{ key }} | test namespace in the tenant cluster
+    - name: inside {{ key }} | Create the namespace kmetal-validate in the tenant cluster
       ansible.builtin.command:
         argv: "{{ _tk + ['apply', '-f', '-'] }}"
         stdin: "{{ {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': 'kmetal-validate'}} | to_json }}"
@@ -66,7 +74,7 @@
     - name: inside {{ key }} | storage
       when: _level == 'full'
       block:
-        - name: inside {{ key }} | PVC data and pod writer
+        - name: inside {{ key }} | Create a PVC on the tenant default class and a pod that writes to it
           ansible.builtin.command:
             argv: "{{ _tk + ['apply', '-f', '-'] }}"
             stdin: >-
@@ -83,7 +91,7 @@
           changed_when: true
           failed_when: false
 
-        - name: inside {{ key }} | wait for writer
+        - name: inside {{ key }} | Wait for the writer pod (up to 7 min)
           ansible.builtin.command:
             argv: "{{ _tk + ['get', 'pod', 'writer', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
           delegate_to: "{{ _e2e_tk[key].host }}"
@@ -95,7 +103,7 @@
           changed_when: false
           failed_when: false
 
-        - name: inside {{ key }} | tenant PVC UID
+        - name: inside {{ key }} | Read the tenant PVC's UID
           ansible.builtin.command:
             argv: "{{ _tk + ['get', 'pvc', 'data', '-n', 'kmetal-validate', '-o', 'jsonpath={.metadata.uid}'] }}"
           delegate_to: "{{ _e2e_tk[key].host }}"
@@ -105,7 +113,7 @@
           failed_when: false
           when: _in_writer.stdout == 'Succeeded'
 
-        - name: inside {{ key }} | under-cluster PVCs of the environment
+        - name: inside {{ key }} | Find the under-cluster PVC behind it and its storage class
           ansible.builtin.command: kubectl get pvc -n {{ _e2e_envs[key].ns }} -o json
           register: _in_pvcs
           changed_when: false
@@ -132,7 +140,7 @@
               {{ v }}
               {%- endif -%}
 
-    - name: inside {{ key }} | egress pod
+    - name: inside {{ key }} | Start a pod that fetches {{ kmv_internet_probe_url }} (egress through the VPC router and the provider network)
       ansible.builtin.command:
         argv: "{{ _tk + ['apply', '-f', '-'] }}"
         stdin: >-
@@ -145,7 +153,7 @@
       changed_when: true
       failed_when: false
 
-    - name: inside {{ key }} | wait for egress
+    - name: inside {{ key }} | Wait for the egress pod (up to 4 min)
       ansible.builtin.command:
         argv: "{{ _tk + ['get', 'pod', 'egress', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
       delegate_to: "{{ _e2e_tk[key].host }}"
@@ -157,7 +165,7 @@
       changed_when: false
       failed_when: false
 
-    - name: inside {{ key }} | SNAT address and egress logs
+    - name: inside {{ key }} | Read the SNAT address and the egress pod's log
       ansible.builtin.command: "{{ item.argv }}"
       delegate_to: "{{ item.host }}"
       ignore_unreachable: true

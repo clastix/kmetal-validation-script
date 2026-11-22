@@ -1,15 +1,20 @@
 ---
 # storage: the classes of spec.storage exist (platform and tenant classes with different
-# names), the VolumeSnapshotClass matches the platform class's driver, the CDI
-# StorageProfile names it; per class, a 1 Gi PVC with a write/read pod placed where the
+# names); only underclusterClassName needs a VolumeSnapshotClass (the one named in
+# clusterClass.values.dataVolume, else its driver's default) and its CDI StorageProfile must
+# name it; per class, a 1 Gi PVC with a write/read pod placed where the
 # real consumer runs; then a snapshot of the platform volume, restored and WRITTEN to.
 
-- name: storage | classes, snapshot classes, StorageProfile
+- name: storage | Read the storage classes, the snapshot classes and the platform class's CDI StorageProfile
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl get storageclass -o json
     - kubectl get volumesnapshotclass -o json
     - kubectl get storageprofile {{ kmv_km.spec.storage.underclusterClassName | default('none', true) }} -o json
+    # to explain an empty StorageProfile snapshotClass: CDI watches VolumeSnapshotClasses only
+    # when the snapshot CRDs existed at its start
+    - kubectl get crd volumesnapshotclasses.snapshot.storage.k8s.io -o jsonpath={.metadata.creationTimestamp}
+    - kubectl get pods -A -l app=containerized-data-importer -o json
   register: _st_read
   changed_when: false
   failed_when: false
@@ -47,31 +52,53 @@
       {%- set ns = namespace(vsc='', clone='') -%}
       {%- if 'uc' in roles -%}
       {%-   set prov = classes[uc].provisioner -%}
+      {#- The VolumeSnapshotClass serving underclusterClassName: the one named in
+          clusterClass.values.dataVolume when it exists on that class's driver, else the driver's
+          default class, else any class of that driver. Only this class needs one. -#}
       {%-   set want = kmv_km.spec.clusterClass['values'].dataVolume.volumeSnapshotClass | default('', true) -%}
-      {%-   if want -%}
+      {%-   set same = vscs | selectattr('driver', 'eq', prov) | list -%}
+      {%-   set dflt = [] -%}
+      {%-   for c in same if (c.metadata.annotations | default({}, true))['snapshot.storage.kubernetes.io/is-default-class'] | default('') == 'true' -%}
+      {%-     set _ = dflt.append(c) -%}
+      {%-   endfor -%}
+      {%-   set pick = ((same | selectattr('metadata.name', 'eq', want) | list) + dflt + same) | first | default({}) -%}
+      {%-   set ns.vsc = pick.metadata.name | default('') -%}
+      {%-   if want and want != ns.vsc -%}
       {%-     set j = vscs | selectattr('metadata.name', 'eq', want) | first | default({}) -%}
-      {%-     if not j -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'VolumeSnapshotClass ' ~ want ~ ' (clusterClass.values.dataVolume) does not exist'}) -%}
-      {%-     elif j.driver != prov -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'VolumeSnapshotClass ' ~ want ~ ' uses driver ' ~ j.driver ~ ', ' ~ uc ~ ' uses ' ~ prov}) -%}
-      {%-     else -%}{%- set ns.vsc = want -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'VolumeSnapshotClass ' ~ want ~ ' on driver ' ~ prov}) -%}
-      {%-     endif -%}
-      {%-   else -%}
-      {%-     set same = vscs | selectattr('driver', 'eq', prov) | list -%}
-      {%-     set dflt = [] -%}
-      {%-     for c in same if (c.metadata.annotations | default({}, true))['snapshot.storage.kubernetes.io/is-default-class'] | default('') == 'true' -%}
-      {%-       set _ = dflt.append(c) -%}
-      {%-     endfor -%}
-      {%-     set pick = (dflt + same) | first | default({}) -%}
-      {%-     if pick -%}{%- set ns.vsc = pick.metadata.name -%}
-      {%-       set _ = v.append({'level': 'PASS', 'msg': 'VolumeSnapshotClass ' ~ ns.vsc ~ ' on driver ' ~ prov ~ ' (clusterClass.values.dataVolume.volumeSnapshotClass not set)'}) -%}
+      {%-     set served = ('; ' ~ uc ~ ' is served by ' ~ ns.vsc) if ns.vsc else '' -%}
+      {%-     if not j -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'clusterClass.values.dataVolume.volumeSnapshotClass ' ~ want ~ ' does not exist' ~ served}) -%}
       {%-     else -%}
-      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'no VolumeSnapshotClass for driver ' ~ prov ~ ': golden images cannot be snapshotted, no tenant machine boots'}) -%}
+      {%-       set _ = v.append({'level': 'FAIL', 'msg': 'clusterClass.values.dataVolume.volumeSnapshotClass ' ~ want ~ ' uses driver ' ~ j.driver
+                                ~ ', underclusterClassName ' ~ uc ~ ' uses ' ~ prov ~ served}) -%}
       {%-     endif -%}
+      {%-   endif -%}
+      {%-   if ns.vsc -%}
+      {%-     set _ = v.append({'level': 'PASS', 'msg': 'VolumeSnapshotClass ' ~ ns.vsc ~ ' serves underclusterClassName ' ~ uc ~ ' (driver ' ~ prov ~ ')'}) -%}
+      {%-   else -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'no VolumeSnapshotClass for underclusterClassName ' ~ uc ~ ' (driver ' ~ prov ~ '): golden images cannot be snapshotted, no tenant machine boots'}) -%}
       {%-   endif -%}
       {%-   set ns.clone = sp.status.cloneStrategy | default('') -%}
       {%-   set snapc = sp.status.snapshotClass | default('') -%}
       {%-   if not sp -%}{%- set _ = v.append({'level': 'WARN', 'msg': 'no CDI StorageProfile ' ~ uc}) -%}
-      {%-   elif not snapc -%}{%- set _ = v.append({'level': 'FAIL', 'msg': 'StorageProfile ' ~ uc ~ ' has no snapshotClass: tenant machines will not boot'}) -%}
-      {%-   else -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'StorageProfile ' ~ uc ~ ': cloneStrategy ' ~ (ns.clone or 'default') ~ ', snapshotClass ' ~ snapc}) -%}
+      {%-   elif not snapc -%}
+      {%-     set msg = 'StorageProfile ' ~ uc ~ ' (underclusterClassName) has no snapshotClass' ~ ((' (expected ' ~ ns.vsc ~ ')') if ns.vsc else '') ~ ': tenant machines will not boot' -%}
+      {%-     if ns.vsc -%}
+      {#-       CDI fills status.snapshotClass itself, but watches VolumeSnapshotClasses only when the
+                snapshot CRDs existed when it started: compare the two times -#}
+      {%-       set crd_t = _st_read.results[3].stdout | default('') -%}
+      {%-       set cdi_t = (((_st_read.results[4].stdout | from_json)['items'] if _st_read.results[4].rc == 0 else [])
+                            | selectattr('metadata.name', 'match', 'cdi-deployment') | map(attribute='status.startTime') | min) | default('') -%}
+      {%-       set hb = (sp.status.conditions | default([], true) | map(attribute='lastHeartbeatTime') | max) | default('unknown') -%}
+      {%-       set msg = msg ~ '. ' ~ ns.vsc ~ ' exists, so CDI has not refreshed this profile (last reconcile ' ~ hb ~ ')'
+                          ~ (('; the snapshot CRDs (' ~ crd_t ~ ') were installed after the CDI controller started (' ~ cdi_t ~ '): it does not watch VolumeSnapshotClasses')
+                             if crd_t and cdi_t and crd_t > cdi_t else '')
+                          ~ '. Fix: kubectl rollout restart deployment/cdi-deployment -n <cdi namespace>, or set spec.snapshotClass: ' ~ ns.vsc ~ ' on the StorageProfile' -%}
+      {%-     endif -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': msg}) -%}
+      {%-   elif ns.vsc and snapc != ns.vsc -%}
+      {%-     set _ = v.append({'level': 'WARN', 'msg': 'StorageProfile ' ~ uc ~ ' names snapshotClass ' ~ snapc ~ ', the class serving underclusterClassName is ' ~ ns.vsc}) -%}
+      {%-   else -%}{%- set _ = v.append({'level': 'PASS', 'msg': 'StorageProfile ' ~ uc ~ ' (underclusterClassName): cloneStrategy ' ~ (ns.clone or 'default') ~ ', snapshotClass ' ~ snapc}) -%}
       {%-   endif -%}
       {%- endif -%}
       {{ {'verdicts': v, 'roles': roles, 'vsc': ns.vsc, 'clone': ns.clone, 'uc': uc} }}

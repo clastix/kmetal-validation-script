@@ -3,7 +3,7 @@
 
 IPv4 arithmetic (CIDRs, MetalLB "a-b" ranges, Kube-OVN "a..b" ranges, single addresses)
 and a few parsers that would be unreadable in Jinja. Each filter is a short plain function;
-selftest.yml shows examples.
+playbooks/selftest.yml shows examples.
 """
 
 import ipaddress
@@ -137,6 +137,27 @@ def kmv_pod_ok(pod):
         return True
     return st.get('phase') == 'Running' and all(
         c.get('ready') for c in st.get('containerStatuses') or [])
+
+
+def kmv_ready_output(text, marker='@@table@@'):
+    """Readiness from `kubectl get X -o json`, a marker line, then `kubectl get X`.
+
+    Returns {'ready': bool, 'status': dict}: ready when the Ready condition is True,
+    .status.ready is true, or the READY printer column is True. An absent or unreadable
+    part counts as not ready (the object may not exist yet).
+    """
+    parts = str(text or '').split(marker, 1)
+    obj = {}
+    try:
+        if parts[0].strip():
+            obj = json.loads(parts[0])
+    except ValueError:
+        obj = {}
+    if not isinstance(obj, dict):
+        obj = {}
+    table = parts[1] if len(parts) > 1 else ''
+    ready = kmv_ready(obj) or kmv_table_col(table, 'READY') == 'True'
+    return {'ready': bool(ready), 'status': obj.get('status') or {}}
 
 
 def kmv_table_col(text, column):

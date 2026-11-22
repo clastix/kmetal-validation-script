@@ -1,17 +1,16 @@
 ---
 # Platform checks and end-to-end tests against the under cluster API.
 #
-#   ansible-playbook -i inventory/<site> kmetal.yml --skip-tags e2e,e2e-tenants   # platform only
-#   ansible-playbook -i inventory/<site> kmetal.yml --tags e2e,e2e-tenants        # e2e only
-#   ansible-playbook kmetal.yml -e kmv_kubeconfig=admin.conf                      # no inventory
+#   ansible-playbook -i inventory/<site> playbooks/kmetal.yml --skip-tags e2e,e2e-tenants   # platform only
+#   ansible-playbook -i inventory/<site> playbooks/kmetal.yml --tags e2e,e2e-tenants        # e2e only
+#   ansible-playbook playbooks/kmetal.yml -e kmv_kubeconfig=admin.conf                      # no inventory
 #
 # Check groups (tags): platform operator metallb storage nodes providers tenancy capi
-# kubevirt crds e2e e2e-tenants. Help: ansible-playbook help.yml -e cmd=kmetal
+# kubevirt crds e2e e2e-tenants. Help: ansible-playbook playbooks/help.yml -e cmd=kmetal
 # The inventory is optional; with it, checks that need SSH to the nodes run too.
 
-- name: kmetal
+- name: Platform 1/2 - check groups against the under cluster API, then the end-to-end tests
   hosts: localhost
-  connection: local
   gather_facts: false
   roles:
     - common
@@ -27,7 +26,7 @@
       ansible.builtin.import_role:
         name: common
         tasks_from: prepare
-      tags: [always]
+      tags: [always, prepare]
 
     - name: Checks
       block:
@@ -104,21 +103,20 @@
               - level: INFO
                 msg: "kmv_keep: test resources of run {{ kmv_rid }} kept"
           when: kmv_created | default(false) and kmv_keep | bool
-          tags: [always]
+          tags: [always, cleanup]
 
         - name: Delete the test resources
           ansible.builtin.include_role:
             name: cleanup
             apply:
-              tags: [always]
+              tags: [always, cleanup]
           vars:
             _cl_rid: "{{ kmv_rid }}"
           when: kmv_created | default(false) and not kmv_keep | bool
-          tags: [always]
+          tags: [always, cleanup]
 
-- name: kmetal | summary
+- name: Platform 2/2 - summary
   hosts: localhost
-  connection: local
   gather_facts: false
   roles:
     - common
@@ -127,4 +125,4 @@
       ansible.builtin.import_role:
         name: common
         tasks_from: summary
-      tags: [always]
+      tags: [always, summary]

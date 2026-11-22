@@ -2,7 +2,7 @@
 # crds: the CRDs tenants rely on exist; every osArtifact tag has a Ready OSArtifact in
 # kmetal-image-builder whose <name>-golden PVC is Bound.
 
-- name: crds | installed CRDs
+- name: crds | Read the installed CRDs
   ansible.builtin.command: kubectl get crd -o jsonpath={.items[*].metadata.name}
   register: _crd_read
   changed_when: false

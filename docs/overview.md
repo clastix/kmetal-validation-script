@@ -55,7 +55,7 @@ The phases are independent:
   pools, central nodes, provider networks, image tags, tenancy subjects, placement.
 - **Plain Ansible.** A standard inventory, one role per command, one tag per check group. The
   only custom code is a small filter plugin (IP arithmetic and parsers) and an action plugin
-  that prints and stores verdicts.
+  that stores verdicts, plus an output plugin that organises the run by check group.
 - **Every check is a verdict.** Each result is PASS, WARN, FAIL or INFO with a sentence saying
   what was found. A failed check never stops the run; the summary lists every FAIL and WARN.
 - **Leave no trace.** Every object a run creates carries a run ID label and is deleted at the
@@ -80,7 +80,7 @@ documentation:
 
 | Topic | Behaviour | Why |
 |---|---|---|
-| Network nodes | Identified by `node-role.kubernetes.io/network` with an empty value | kMetal 1.0.1 places Kube-OVN's DaemonSets by this label; `kmetal.io/ovn` is no longer read |
+| Network nodes | Identified by `node-role.kubernetes.io/network` with an empty value, and must also carry `kmetal.io/ovn=true` | kMetal 1.0.1 places Kube-OVN's DaemonSets by the network label; the kmetal-networking agent still selects `kmetal.io/ovn=true`, which the operator no longer sets |
 | Operator-set labels | `ovn.kubernetes.io/external-gw`, `kube-ovn/role=master` and the removal of `exclude-from-external-load-balancers` are still checked | 1.0.1's node labelling controller sets them; a missing label means the controller is not working |
 | Worker OS images | Read from `spec.clusterClass.values.osArtifact.tags` | The field path in the `KMetal` resource |
 | `kube-ovn/role=master` | Checked on `spec.networking.kubeOVN.centralNodes`, ideally the three control planes | It is ovn-central's nodeSelector |

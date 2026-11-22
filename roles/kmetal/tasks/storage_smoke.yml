@@ -3,7 +3,7 @@
 # pod that writes, syncs and reads it. Platform and tenant classes run on compute nodes,
 # the etcd class follows spec.placement (control planes by default).
 
-- name: storage | PVC pvc-{{ _sc.key }} and pod w-{{ _sc.key }} on {{ _sc.value }}
+- name: storage | Create a 1 Gi PVC on {{ _sc.value }} ({{ _sc.key }}) and a pod that writes and reads it
   kubernetes.core.k8s:
     state: present
     definition:
@@ -41,7 +41,7 @@
   register: _st_apply
   ignore_errors: true
 
-- name: storage | wait for w-{{ _sc.key }}
+- name: storage | Wait for that pod (up to 5 min)
   kubernetes.core.k8s_info:
     kind: Pod
     name: "w-{{ _sc.key }}"

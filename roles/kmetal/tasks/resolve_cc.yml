@@ -2,7 +2,7 @@
 # Sets kmv_ccs (ClusterClass names in kmetal-capi-providers), kmv_cc (the one the
 # end-to-end tests use) and kmv_capi_v1beta2 (cluster.x-k8s.io/v1beta2 served). No verdicts.
 
-- name: resolve ClusterClass | API versions and ClusterClasses
+- name: resolve ClusterClass | Read the served Cluster API versions and the ClusterClasses
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl api-versions

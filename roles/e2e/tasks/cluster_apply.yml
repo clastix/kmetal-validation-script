@@ -3,7 +3,7 @@
 # _e2e_tag: controlPlane exposed as LoadBalancer, machineSize, osImage (the OSArtifact),
 # network.subnet primary, each set only when the ClusterClass declares the variable.
 
-- name: cluster {{ key }} | ClusterClass {{ kmv_cc }}
+- name: cluster {{ key }} | Read the variables ClusterClass {{ kmv_cc }} declares
   ansible.builtin.command: kubectl get clusterclasses.cluster.x-k8s.io {{ kmv_cc }} -n {{ kmv_ns_capi }} -o json
   register: _ca_cc
   changed_when: false
@@ -24,7 +24,7 @@
       {{ (((_ca_cc.stdout | from_json).spec.workers.machineDeployments | default([{}], true) | first).class | default('default-worker'))
          if _ca_cc.rc == 0 else 'default-worker' }}
 
-- name: cluster {{ key }} | apply {{ _e2e_envs[key].ns }}/{{ _e2e_envs[key].cluster }}
+- name: cluster {{ key }} | Create the tenant Cluster {{ _e2e_envs[key].ns }}/{{ _e2e_envs[key].cluster }} with {{ _e2e_envs[key].workers }} worker(s) (deleted at the end)
   kubernetes.core.k8s:
     state: present
     definition:

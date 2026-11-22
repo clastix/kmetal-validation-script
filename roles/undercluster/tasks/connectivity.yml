@@ -3,7 +3,7 @@
 # evaluate. Runs on every node in parallel. A node that fails here records a FAIL and is
 # dropped from the rest of the play.
 
-- name: connectivity | SSH, sudo and system facts
+- name: connectivity | Connect over SSH, become root with sudo -n, gather CPU, memory, disk and OS facts
   ansible.builtin.setup:
     gather_subset: [min, hardware]
     gather_timeout: 30
@@ -26,7 +26,7 @@
     - name: connectivity | drop the node from the play
       ansible.builtin.meta: end_host
 
-- name: connectivity | links and addresses
+- name: connectivity | Read the links and addresses (ip -d -j link, ip -j addr)
   ansible.builtin.command: "{{ item }}"
   loop:
     - ip -d -j link show
@@ -34,7 +34,7 @@
   register: _uc_ip
   changed_when: false
 
-- name: connectivity | sysctls, tools, modules, link speeds  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
+- name: connectivity | Read sysctls, installed tools, kernel modules and link speeds  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
   ansible.builtin.shell: |
     has() { command -v "$1" >/dev/null 2>&1 && echo 1 || echo 0; }
     echo "inotify=$(sysctl -n fs.inotify.max_user_instances 2>/dev/null)"
@@ -54,7 +54,7 @@
   register: _uc_misc
   changed_when: false
 
-- name: connectivity | netplan configuration
+- name: connectivity | Read the netplan configuration (netplan get)
   ansible.builtin.command: netplan get
   register: _uc_netplan
   changed_when: false

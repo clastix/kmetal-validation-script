@@ -11,7 +11,7 @@ so a run can be agreed with the customer in advance.
 |---|---|---|
 | `check-env.yml`, `help.yml`, `selftest.yml` | nothing | nothing |
 | `undercluster.yml` | Read-only, except a `kvtest0` tunnel device (Geneve/VXLAN, link-local `169.254.250.0/30`) that exists for a few seconds on two overlay nodes | nothing |
-| `kmetal.yml --skip-tags e2e,e2e-tenants` | nothing (read-only SSH commands) | Namespace `kmetal-validate-<id>` with an nginx Deployment, one LoadBalancer Service per MetalLB pool, a 1 Gi PVC and writer pod per storage class, one VolumeSnapshot and one restored PVC. A probe namespace attempt (normally rejected; deleted right away otherwise) |
+| `playbooks/kmetal.yml --skip-tags e2e,e2e-tenants` | nothing (read-only SSH commands) | Namespace `kmetal-validate-<id>` with an nginx Deployment, one LoadBalancer Service per MetalLB pool, a 1 Gi PVC and writer pod per storage class, one VolumeSnapshot and one restored PVC. A probe namespace attempt (normally rejected; deleted right away otherwise) |
 | `kmetal.yml` (tag `e2e`) | a temporary tenant kubeconfig (mode 0600) on the control plane that runs tenant `kubectl`, in `ssh` mode only | Everything above, plus one Tenant with its ServiceAccount, two environments with VPC and subnet claims, an EipClaim, and two tenant clusters (3 worker VMs) |
 | `kmetal.yml` (tag `e2e-tenants`) | as above | Two more Tenants with their ServiceAccounts, one environment each with VPC and subnet claims, and two tenant clusters (3 worker VMs) |
 
@@ -67,19 +67,19 @@ run ID printed at the start.
 `-e kmv_keep=true` skips the cleanup; the summary prints the command to run later:
 
 ```bash
-ansible-playbook -i inventory/<site> kmetal.yml --tags e2e,e2e-tenants -e kmv_keep=true
+ansible-playbook -i inventory/<site> playbooks/kmetal.yml --tags e2e,e2e-tenants -e kmv_keep=true
 # ... inspect the environments kv-<id>-a / kv-<id>-b ...
-ansible-playbook -i inventory/<site> cleanup.yml -e kmv_run_id=<id>
+ansible-playbook -i inventory/<site> playbooks/cleanup.yml -e kmv_run_id=<id>
 ```
 
 ## Cleanup
 
-`cleanup.yml -e kmv_run_id=ID` removes everything labelled with that run ID, even without the
+`playbooks/cleanup.yml -e kmv_run_id=ID` removes everything labelled with that run ID, even without the
 original session (for example after Ctrl-C or a lost SSH connection). It runs the same
 `cleanup` role as above and, when the inventory lists nodes, deletes `kvtest0` on every node.
 
-It ends with PASS when nothing labelled with the run ID remains, and WARN with the list of what
-is left otherwise.
+It ends with PASS when nothing labelled with the run ID remains, and FAIL with the list of what
+is left otherwise (at the end of a `kmetal.yml` run the same leftovers are a WARN).
 
 ## Before running on a customer site
 

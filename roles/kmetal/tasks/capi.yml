@@ -3,7 +3,7 @@
 # control-plane (kamaji) provider in kmetal-capi-providers, each Ready; at least one
 # ClusterClass, and the one the end-to-end tests will use.
 
-- name: capi | providers
+- name: capi | Read the Cluster API providers in {{ kmv_ns_capi }}
   ansible.builtin.command: kubectl get {{ item }}.operator.cluster.x-k8s.io -n {{ kmv_ns_capi }} -o json
   loop: [coreproviders, bootstrapproviders, infrastructureproviders, controlplaneproviders]
   register: _capi_read

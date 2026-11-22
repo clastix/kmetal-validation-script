@@ -40,6 +40,8 @@ kmv_encap_test_port: 6090
 # --- kMetal installation ---------------------------------------------------------------
 kmv_operator_namespace: kmetal-operator-system
 kmv_operator_release: kmetal-operator
+# Chart of the operator: a Helm release installing it matches whatever its name.
+kmv_operator_chart: kmetal-operator
 kmv_ns_flux: kmetal-flux
 kmv_ns_metallb: kmetal-metallb
 kmv_ns_kubevirt: system-kubevirt

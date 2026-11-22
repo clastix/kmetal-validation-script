@@ -64,10 +64,16 @@ applies the role labels; the operator derives the others. Checked by `kmetal` â†
 | `ovn.kubernetes.io/external-gw=true` | operator, on every network node | Every network node | FAIL: the node labelling controller did not apply it; VPCs with external access have no gateway |
 | `kube-ovn/role=master` | operator, from `spec.networking.kubeOVN.centralNodes` | Every central node | FAIL on a central node without it. WARN on a node that has it but is not central |
 | `node.kubernetes.io/exclude-from-external-load-balancers` | kubeadm sets it; the operator **removes** it from control planes | **No control plane** | FAIL: MetalLB speakers must announce from the control planes, and this label stops them. The operator should have removed it |
-| `kmetal.io/ovn` | (before 1.0.1) | Nowhere | No longer read. INFO on a network node ("can be removed"). WARN on a node that has it but lacks the network label: it was not relabelled before the upgrade, and Kube-OVN no longer runs there |
+| `kmetal.io/ovn=true` (the value the networking agent selects) | administrator; the 1.0.1 operator no longer sets it | Every network node | FAIL: the kmetal-networking agent DaemonSet does not run there, and tenant workers never join their cluster. WARN on a control plane |
 
 Before upgrading to 1.0.1, every node carrying the overlay must be labelled
 `node-role.kubernetes.io/network=`; otherwise the Kube-OVN DaemonSets leave those nodes.
+
+Kube-OVN no longer reads `kmetal.io/ovn`, but the kmetal-networking agent DaemonSet
+(`kmetal-system-kmetal-networking-agent`, chart kmetal-networking 1.12.0) still selects its
+nodes with `kmetal.io/ovn=true`. Keep the label on every network node; without it the agent
+runs on no node, and tenant workers boot but never join their cluster. The check reads the
+selector from the DaemonSet, so it follows the chart if the selector changes.
 
 ## Kube-OVN central nodes
 

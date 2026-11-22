@@ -161,8 +161,9 @@ Usually given with `-e` on the command line ([Getting started](getting-started.m
 | Variable | Default | Meaning |
 |---|---|---|
 | `kmv_target_kmetal` | `1.0.1` | kMetal release the rules follow |
-| `kmv_operator_namespace` | `kmetal-operator-system` | Namespace of the operator's Helm release |
-| `kmv_operator_release` | `kmetal-operator` | Helm release, or Flux HelmRelease, name |
+| `kmv_operator_namespace` | `kmetal-operator-system` | Namespace searched first for the operator's Helm release; `kmetal-flux` is searched next |
+| `kmv_operator_release` | `kmetal-operator` | Helm release, or Flux HelmRelease, name; `<namespace>-kmetal-operator` also matches |
+| `kmv_operator_chart` | `kmetal-operator` | Chart of the operator; a Helm release installing it matches whatever its name |
 | `kmv_pool_names` | `tenant-cp-pool`, `mgmt-pool` | MetalLB pool names the operator creates |
 | `kmv_ns_flux`, `kmv_ns_metallb`, `kmv_ns_kubevirt`, `kmv_ns_capi`, `kmv_ns_images` | `kmetal-flux`, `kmetal-metallb`, `system-kubevirt`, `kmetal-capi-providers`, `kmetal-image-builder` | Platform namespaces |
 

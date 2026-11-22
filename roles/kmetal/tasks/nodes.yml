@@ -5,16 +5,21 @@
 #  - compute: node-role.kubernetes.io/compute, with a Ready virt-handler;
 #  - network nodes: node-role.kubernetes.io/network with an EMPTY value (never control
 #    planes), ovn.kubernetes.io/external-gw=true (set by the operator), a Ready
-#    kube-ovn-cni and the tunnelInterface; kmetal.io/ovn is no longer read;
+#    kube-ovn-cni, the tunnelInterface, and the labels the kmetal-networking agent DaemonSet
+#    selects (kmetal.io/ovn=true) with a Ready agent pod. The 1.0.1 operator no longer sets
+#    kmetal.io/ovn, but the agent (chart kmetal-networking 1.12.0) still selects it: without it
+#    the agent runs nowhere and tenant workers never join their cluster;
 #  - centralNodes: kube-ovn/role=master (set by the operator); ideally the three control
 #    planes, an odd number, at least three.
 
-- name: nodes | nodes, virt-handler and kube-ovn-cni pods
+- name: nodes | Read the nodes, and the virt-handler, kube-ovn-cni and networking agent pods
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl get nodes -o json
     - kubectl get pods -n {{ kmv_ns_kubevirt }} -l kubevirt.io=virt-handler -o json
     - kubectl get pods -A -l app=kube-ovn-cni -o json
+    - kubectl get ds -A -l app.kubernetes.io/name=kmetal-networking,app.kubernetes.io/component=agent -o json
+    - kubectl get pods -A -l app.kubernetes.io/name=kmetal-networking,app.kubernetes.io/component=agent -o json
   register: _nd_read
   changed_when: false
   failed_when: false
@@ -27,17 +32,23 @@
       {%- for n in items -%}{%- set _ = labels.update({n.metadata.name: n.metadata.labels | default({})}) -%}{%- endfor -%}
       {%- set vh = ((_nd_read.results[1].stdout | from_json)['items'] if _nd_read.results[1].rc == 0 else []) | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
       {%- set cni = ((_nd_read.results[2].stdout | from_json)['items'] if _nd_read.results[2].rc == 0 else []) | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
-      {%- set out = {'labels': labels, 'vh': vh, 'cni': cni, 'cps': [], 'compute': [], 'network': [], 'ovn_old': []} -%}
+      {%- set agent = (((_nd_read.results[3].stdout | from_json)['items'] if _nd_read.results[3].rc == 0 else []) | first) | default({}) -%}
+      {%- set agent_ready = ((_nd_read.results[4].stdout | from_json)['items'] if _nd_read.results[4].rc == 0 else []) | select('kmv_pod_ok') | map(attribute='spec.nodeName') | list -%}
+      {%- set out = {'labels': labels, 'vh': vh, 'cni': cni, 'cps': [], 'compute': [], 'network': [],
+                     'agent': (agent.metadata.namespace ~ '/' ~ agent.metadata.name) if agent else '',
+                     'agent_sel': agent.spec.template.spec.nodeSelector | default({'kmetal.io/ovn': 'true'}, true) if agent else {'kmetal.io/ovn': 'true'},
+                     'agent_desired': agent.status.desiredNumberScheduled | default(0) if agent else 0,
+                     'agent_ready_n': agent.status.numberReady | default(0) if agent else 0,
+                     'agent_ready': agent_ready} -%}
       {%- for name, l in labels.items() -%}
       {%-   if kmv_cp_label in l -%}{%- set _ = out.cps.append(name) -%}{%- endif -%}
       {%-   if kmv_compute_label in l -%}{%- set _ = out.compute.append(name) -%}{%- endif -%}
       {%-   if kmv_network_label in l -%}{%- set _ = out.network.append(name) -%}{%- endif -%}
-      {%-   if 'kmetal.io/ovn' in l -%}{%- set _ = out.ovn_old.append(name) -%}{%- endif -%}
       {%- endfor -%}
       {{ out }}
     _nd_tif: "{{ kmv_km.spec.networking.kubeOVN.tunnelInterface | default('', true) }}"
 
-- name: nodes | tunnel interface on the network nodes (SSH)
+- name: nodes | Look for the tunnel interface {{ _nd_tif }} on each network node over SSH
   ansible.builtin.command: ip link show dev {{ _nd_tif }}
   delegate_to: "{{ item }}"
   ignore_unreachable: true
@@ -87,6 +98,20 @@
       {%-       set _ = v.append({'level': 'FAIL', 'msg': n ~ ": ovn.kubernetes.io/external-gw=true missing: the operator's node labelling controller did not apply it"}) -%}
       {%-     endif -%}
       {%-     set _ = v.append({'level': 'PASS', 'msg': n ~ ': kube-ovn-cni Ready'} if n in _nd.cni else {'level': 'FAIL', 'msg': n ~ ': no Ready kube-ovn-cni pod'}) -%}
+      {%-     for k, val in _nd.agent_sel.items() -%}
+      {%-       if k not in L[n] -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ k ~ '=' ~ val ~ ' missing on a network node: the kmetal-networking agent selects it, without it tenant workers never join (kubectl label node '
+                                    ~ n ~ ' ' ~ k ~ '=' ~ val ~ ')'}) -%}
+      {%-       elif L[n][k] | string != val | string -%}
+      {%-         set _ = v.append({'level': 'FAIL', 'msg': n ~ ': ' ~ k ~ '=' ~ L[n][k] ~ ', the kmetal-networking agent selects ' ~ k ~ '=' ~ val ~ ' (kubectl label node ' ~ n ~ ' --overwrite ' ~ k ~ '=' ~ val ~ ')'}) -%}
+      {%-       else -%}
+      {%-         set _ = v.append({'level': 'PASS', 'msg': n ~ ': ' ~ k ~ '=' ~ val}) -%}
+      {%-       endif -%}
+      {%-     endfor -%}
+      {%-     if _nd.agent -%}
+      {%-       set _ = v.append({'level': 'PASS', 'msg': n ~ ': kmetal-networking agent Ready'} if n in _nd.agent_ready
+                                else {'level': 'FAIL', 'msg': n ~ ': no Ready kmetal-networking agent pod (' ~ _nd.agent ~ ')'}) -%}
+      {%-     endif -%}
       {%-   endfor -%}
       {%-   for r in _nd_tun.results | default([]) if not (r.skipped | default(false)) -%}
       {%-     if r.unreachable | default(false) -%}
@@ -97,13 +122,17 @@
       {%-     endif -%}
       {%-   endfor -%}
       {%- endif -%}
-      {%- for n in _nd.ovn_old -%}
-      {%-   if n in _nd.network -%}
-      {%-     set _ = v.append({'level': 'INFO', 'msg': n ~ ': kmetal.io/ovn is no longer read by kMetal ' ~ kmv_target_kmetal ~ ' and can be removed'}) -%}
-      {%-   else -%}
-      {%-     set _ = v.append({'level': 'WARN', 'msg': n ~ ': labelled kmetal.io/ovn but not ' ~ kmv_network_label ~ '; kMetal ' ~ kmv_target_kmetal
-                                ~ ' runs Kube-OVN only on ' ~ kmv_network_label ~ ' nodes (relabel: kubectl label node ' ~ n ~ ' ' ~ kmv_network_label ~ '=)'}) -%}
+      {%- if not _nd.agent -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'no kmetal-networking agent DaemonSet found (labels app.kubernetes.io/name=kmetal-networking, component=agent): kmetal.io/ovn=true still required on network nodes'}) -%}
+      {%- else -%}
+      {%-   set sel = [] -%}{%- for k, val in _nd.agent_sel.items() -%}{%- set _ = sel.append(k ~ '=' ~ val) -%}{%- endfor -%}
+      {%-   set _ = v.append({'level': 'INFO', 'msg': 'kmetal-networking agent ' ~ _nd.agent ~ ' selects ' ~ sel | join(',') ~ ', desired ' ~ _nd.agent_desired ~ ', ready ' ~ _nd.agent_ready_n}) -%}
+      {%-   if _nd.agent_desired | int == 0 -%}
+      {%-     set _ = v.append({'level': 'FAIL', 'msg': 'kmetal-networking agent ' ~ _nd.agent ~ ' is scheduled on no node: no node matches its nodeSelector ' ~ sel | join(',')}) -%}
       {%-   endif -%}
+      {%- endif -%}
+      {%- for n in _nd.cps if 'kmetal.io/ovn' in L[n] -%}
+      {%-   set _ = v.append({'level': 'WARN', 'msg': n ~ ': control plane labelled kmetal.io/ovn; the networking agent belongs on network nodes only (kubectl label node ' ~ n ~ ' kmetal.io/ovn-)'}) -%}
       {%- endfor -%}
       {%- set central = kmv_km.spec.networking.kubeOVN.centralNodes | default([], true) -%}
       {%- set ns = namespace(cpc=0) -%}

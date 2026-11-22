@@ -14,7 +14,7 @@ be installed on the nodes except Python, which Ubuntu ships.
 
 ```
 bootstrap machine (controller)            nodes
-  ansible-playbook undercluster.yml  --SSH-->  run a module, return JSON
+  ansible-playbook playbooks/undercluster.yml  --SSH-->  run a module, return JSON
   evaluate the JSON, print verdicts  <-------
 ```
 
@@ -48,11 +48,12 @@ control_plane:
 `mgmt` address. `ansible_user` is the SSH user. Variables whose name starts with `ansible_`
 configure Ansible itself; the project's own variables start with `kmv_`.
 
-Select an inventory with `-i`: `ansible-playbook -i inventory/mysite undercluster.yml`.
+Select an inventory with `-i`: `ansible-playbook -i inventory/mysite playbooks/undercluster.yml`.
 
 ## Playbook, play, task
 
-A **playbook** is a YAML file with one or more **plays**. A play says *which hosts* and *which
+A **playbook** is a YAML file with one or more **plays**; this project keeps its playbooks in
+`playbooks/`. A play says *which hosts* and *which
 tasks*:
 
 ```yaml
@@ -121,9 +122,9 @@ Facts are variables Ansible gathers from a host, such as its CPU count and memor
 Every check group is a **tag**:
 
 ```bash
-ansible-playbook -i inventory/mysite undercluster.yml --tags interfaces,mesh
-ansible-playbook -i inventory/mysite kmetal.yml --skip-tags e2e,e2e-tenants
-ansible-playbook -i inventory/mysite undercluster.yml --list-tags     # what exists
+ansible-playbook -i inventory/mysite playbooks/undercluster.yml --tags interfaces,mesh
+ansible-playbook -i inventory/mysite playbooks/kmetal.yml --skip-tags e2e,e2e-tenants
+ansible-playbook -i inventory/mysite playbooks/undercluster.yml --list-tags     # what exists
 ```
 
 Tasks tagged `always` (preparation, connectivity, summary, cleanup) run whatever you select.
@@ -183,23 +184,41 @@ needs passwordless sudo, or `ansible_user: root`.
 
 ## Reading the output
 
+This project replaces Ansible's standard output with its own output plugin
+(`callback_plugins/kmv_output.py`, set in `ansible.cfg`), organised by check group:
+
 ```
-TASK [undercluster : interfaces | verdicts] **********************************
-  PASS worker-01: mgmt bond0.104 VLAN 104 MTU 9100 10.0.0.12/24 (on bond0)
-  FAIL worker-02: provider provider (bond0.106): carries IPv4 10.0.6.13: ...
-ok: [worker-01]
-ok: [worker-02]
+== Under cluster 2/3 - on every node, in parallel, over SSH with sudo ==     <- a play
+
+>> mesh - full-mesh reachability on every node network                      <- a check group (a tag)
+  Each node pings every peer address on each network both have, ...         <- how it checks
+  FAIL  peer unreachable (100% loss)                                        <- what its outcomes mean
+  WARN  partial loss; jumbo frame does not pass end to end
+
+  > Ping every peer address on each shared network (plus a jumbo frame ...)  <- a step
+  PASS worker-01: 4 peer addresses reachable without loss                   <- verdicts
+  FAIL worker-02 -> 10.0.5.13 on overlay (bond0.105): unreachable
+  => mesh: 2 passed, 1 failures                                             <- tally
 ```
 
-- `TASK [role : name]` is the step being run.
-- The indented `PASS`, `WARN`, `FAIL` and `INFO` lines are the verdicts.
+[Getting started](getting-started.md#output) explains every kind of line.
+
+With **`-v`**, Ansible's standard output comes back, which is what Ansible documentation and
+forums show:
+
+```
+TASK [undercluster : mesh | Ping every peer address on each shared network ...] ****
+ok: [worker-01] => ...
+ok: [worker-02] => ...
+```
+
+- `TASK [role : name]` is the task being run, internal ones included.
 - `ok`, `changed`, `skipping` and `failed` describe the task itself, not the check: a probe that
   finds a problem still reports `ok`, and the verdict says FAIL.
-- `PLAY RECAP` at the end counts tasks per host. The project's own summary, just before it,
-  counts verdicts.
+- `PLAY RECAP` at the end counts tasks per host.
 
-`-v` adds detail for each task, and `-vvv` shows the SSH connections, which helps when a node is
-unreachable.
+Use `-v` when a step fails unexpectedly (an `ERROR` line) and you need its full result, and
+`-vvv` to see the SSH connections when a node is unreachable.
 
 ## Glossary
 

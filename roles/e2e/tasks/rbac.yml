@@ -3,7 +3,7 @@
 # secrets and cluster kubeconfig, its Clusters and network claims, its namespace and its
 # Tenant (kubectl auth can-i, impersonating the owner).
 
-- name: rbac | {{ _src }} -> {{ _dst }} can-i probes
+- name: rbac | As the owner of {{ _e2e_envs[_src].tenant }}, ask for ten actions on {{ _e2e_envs[_dst].tenant }} (kubectl auth can-i; all must be denied)
   ansible.builtin.command:
     argv: >-
       {{ ['kubectl', 'auth', 'can-i'] + item.split(' ')

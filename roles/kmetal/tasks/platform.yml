@@ -1,7 +1,7 @@
 ---
 # platform: the KMetal resource is READY and every .status.components[] entry is Ready.
 
-- name: platform | KMetal printer columns
+- name: platform | Read the READY and VERSION columns of the KMetal resource
   ansible.builtin.command: kubectl get km {{ kmv_km.metadata.name }}
   register: _km_table
   changed_when: false

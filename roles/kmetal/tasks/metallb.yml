@@ -5,7 +5,7 @@
 # (control planes by default); a LoadBalancer Service pinned to each pool gets an address in
 # range and answers HTTP.
 
-- name: metallb | pools, advertisements, speakers, nodes
+- name: metallb | Read the address pools, L2 advertisements, speaker pods and nodes
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl get ipaddresspools.metallb.io -n {{ kmv_ns_metallb }} -o json
@@ -114,7 +114,7 @@
       vars:
         _tns_group: metallb
 
-    - name: metallb | backend
+    - name: metallb | Create an nginx backend in kmetal-validate-{{ kmv_rid }} (deleted at the end)
       kubernetes.core.k8s:
         state: present
         wait: true

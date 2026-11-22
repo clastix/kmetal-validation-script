@@ -1,0 +1,47 @@
+---
+# Site description read by kmetal-validate. Every key is documented in
+# docs/configuration.md; defaults are in roles/common/defaults/main.yml.
+
+# --- networks carrying a node IP --------------------------------------------------------
+# mgmt, tenant and overlay are required; add others (e.g. storage) as needed.
+#   interface: name on the nodes (a VLAN sub-interface, a bond or a NIC)
+#   vlan:      VLAN ID the interface must carry; 0 or absent: not a VLAN device
+#   cidr:      network; must not overlap the other networks, the primary CNI pod CIDR,
+#              the service CIDR, kubeOVN.podCIDR or 100.64.0.0/16
+#   mtu:       optional; above 1500 a do-not-fragment ping checks it end to end
+kmv_networks:
+  mgmt: {interface: bond0.104, vlan: 104, cidr: 172.22.104.0/24, mtu: 9100}
+  tenant: {interface: bond0.108, vlan: 108, cidr: 172.22.108.0/24, mtu: 9100}
+  overlay: {interface: bond0.105, vlan: 105, cidr: 172.22.105.0/24, mtu: 9100}
+
+# The only network allowed to reach the internet from the nodes.
+kmv_internet_network: mgmt
+# Networks whose absence is a warning rather than a failure.
+kmv_optional_networks: []
+
+# --- provider networks: workers only, the interface carries no IP -----------------------
+kmv_provider_networks:
+  provider: {interface: bond0.106, vlan: 106}
+
+# Kube-OVN central nodes. Read from the KMetal resource when a kubeconfig works; set them
+# here to check the under cluster before kMetal is installed. Ideally the three control
+# planes.
+kmv_central_nodes: [ kmetal-controller ]
+
+# --- probes -----------------------------------------------------------------------------
+kmv_internet_probe_url: https://ghcr.io
+kmv_internet_probe_ip: 1.1.1.1
+kmv_dns_probe: ghcr.io
+
+# --- end-to-end tests (see docs/e2e-test.md) --------------------------------------------
+kmv_e2e_subnet_cidr: 10.250.0.0/24
+kmv_e2e_clusterclass: ""
+kmv_e2e_k8s_version: ""
+# Images pulled by the test pods; point them at a mirror on air-gapped sites.
+kmv_test_image: nginx:alpine
+kmv_probe_image: busybox:1.36
+kmv_curl_image: curlimages/curl:8.10.1
+# How to reach tenant API servers: auto (direct, else SSH to a control plane), direct, ssh.
+kmv_tenant_access: direct
+# Where an EIP is curled from: local, or a node name.
+kmv_eip_probe_from: local

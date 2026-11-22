@@ -71,7 +71,7 @@
       when: "'t1' in _e2e_applied or 't2' in _e2e_applied"
 
   always:
-    - name: e2e | delete the tenant Service web (unbinds the EIP)
+    - name: e2e | Delete the tenant Service web, which releases the EIP
       ansible.builtin.command:
         argv: [kubectl, --kubeconfig, "{{ (_e2e_tk.a | default({})).kc | default('') }}", delete, service, web, -n, kmetal-validate, --ignore-not-found, --wait=true, --timeout=120s]
       delegate_to: "{{ (_e2e_tk.a | default({})).host | default('localhost') }}"
@@ -80,7 +80,7 @@
       failed_when: false
       when: "'a' in (_e2e_tk | default({})) and _e2e_eip_applied | default(false) and not kmv_keep | bool"
 
-    - name: e2e | remove the temporary tenant kubeconfigs
+    - name: e2e | Remove the temporary tenant kubeconfigs
       ansible.builtin.file:
         path: "{{ item.value.kc }}"
         state: absent

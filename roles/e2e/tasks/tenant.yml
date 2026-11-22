@@ -2,14 +2,14 @@
 # Tenant _t: ServiceAccount _t (its owner) in the tenant group's namespace, and the Capsule
 # Tenant _t owned by it. Verdicts go to group _grp. Sets _e2e_tenant_ok[_t].
 
-- name: tenant | namespace {{ _e2e_sa_ns }} for the owners
+- name: tenant | Look for the namespace {{ _e2e_sa_ns }} of the tenant owners
   ansible.builtin.command: kubectl get namespace {{ _e2e_sa_ns }}
   register: _tn_sa_ns
   changed_when: false
   failed_when: false
   when: not (_e2e_sa_ns_ready | default(false))
 
-- name: tenant | create namespace {{ _e2e_sa_ns }}
+- name: tenant | Create the namespace {{ _e2e_sa_ns }} (deleted at the end)
   kubernetes.core.k8s:
     state: present
     definition:
@@ -28,7 +28,7 @@
         msg: "created namespace {{ _e2e_sa_ns }} for tenant ServiceAccounts"
   when: not (_e2e_sa_ns_ready | default(false)) and _tn_sa_ns.rc != 0 and not (_tn_sa_create.failed | default(false))
 
-- name: tenant | owner ServiceAccount and Tenant {{ _t }}
+- name: tenant | Create the ServiceAccount {{ _t }} and the Capsule Tenant {{ _t }} it owns
   kubernetes.core.k8s:
     state: present
     definition:
@@ -51,7 +51,7 @@
     _e2e_sa_ns_ready: true
     kmv_created: true
 
-- name: tenant | wait for Tenant {{ _t }}
+- name: tenant | Wait for the Tenant {{ _t }} to be Ready (up to 2 min)
   ansible.builtin.command: kubectl get tenants.capsule.clastix.io {{ _t }} -o json
   register: _tn_get
   until: >-

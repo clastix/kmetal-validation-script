@@ -2,7 +2,7 @@
 # Environment a: its worker VMs run on different hosts, and a pod on one worker reaches a
 # pod on the other (Kube-OVN overlay between hosts). Uses _tk from inside.yml.
 
-- name: crossnode | hosts of the worker VMs
+- name: crossnode | Read which hosts run the worker VMs
   ansible.builtin.command: kubectl get vmi -n {{ _e2e_envs[key].ns }} -o json
   register: _xn_vmi
   changed_when: false
@@ -19,7 +19,7 @@
 - name: crossnode | two pods on different workers
   when: _e2e_envs[key].workers | int >= 2
   block:
-    - name: crossnode | Deployment xnode with anti-affinity
+    - name: crossnode | Create two nginx pods on different workers in the tenant cluster
       ansible.builtin.command:
         argv: "{{ _tk + ['apply', '-f', '-'] }}"
         stdin: >-
@@ -34,7 +34,7 @@
       changed_when: true
       failed_when: false
 
-    - name: crossnode | wait for both pods
+    - name: crossnode | Wait for both pods (up to 5 min)
       ansible.builtin.command:
         argv: "{{ _tk + ['get', 'pods', '-n', 'kmetal-validate', '-l', 'app=xnode', '-o', 'json'] }}"
       delegate_to: "{{ _e2e_tk[key].host }}"
@@ -59,7 +59,7 @@
           {{ {'ok': false} }}
           {%- endif -%}
 
-    - name: crossnode | probe pod on {{ _xn.node | default('?') }}
+    - name: crossnode | Start a pod on {{ _xn.node | default('?') }} that fetches the pod on the other worker
       ansible.builtin.command:
         argv: "{{ _tk + ['apply', '-f', '-'] }}"
         stdin: >-
@@ -73,7 +73,7 @@
       failed_when: false
       when: _xn.ok
 
-    - name: crossnode | wait for xprobe
+    - name: crossnode | Wait for that pod (up to 3 min)
       ansible.builtin.command:
         argv: "{{ _tk + ['get', 'pod', 'xprobe', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.phase}'] }}"
       delegate_to: "{{ _e2e_tk[key].host }}"

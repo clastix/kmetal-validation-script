@@ -1,0 +1,3 @@
+---
+# Every node is reached over SSH on its mgmt address.
+ansible_host: "{{ kmv_addresses.mgmt | split('/') | first }}"

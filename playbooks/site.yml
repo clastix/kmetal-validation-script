@@ -1,7 +1,7 @@
 ---
 # Full acceptance of a site: under cluster checks, then platform checks and e2e tests.
 #
-#   ansible-playbook -i inventory/<site> site.yml
+#   ansible-playbook -i inventory/<site> playbooks/site.yml
 #
 # The under cluster summary does not stop the run; the final summary covers both parts.
 

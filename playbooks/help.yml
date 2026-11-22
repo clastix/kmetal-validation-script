@@ -1,16 +1,15 @@
 ---
 # What each check group tests. Contacts nothing.
 #
-#   ansible-playbook help.yml                                  # playbooks and usage
-#   ansible-playbook help.yml -e cmd=undercluster              # undercluster groups
-#   ansible-playbook help.yml -e cmd=kmetal -e group=nodes     # one group in detail
+#   ansible-playbook playbooks/help.yml                                  # playbooks and usage
+#   ansible-playbook playbooks/help.yml -e cmd=undercluster              # undercluster groups
+#   ansible-playbook playbooks/help.yml -e cmd=kmetal -e group=nodes     # one group in detail
 
-- name: help
+- name: Help
   hosts: localhost
-  connection: local
   gather_facts: false
   vars_files:
-    - roles/common/vars/help.yml
+    - ../roles/common/vars/help.yml
   vars:
     cmd: ""
     group: ""
@@ -20,16 +19,16 @@
         msg:
           - "kmetal-validate - validation of a kMetal 1.0.1 under cluster and platform"
           - ""
-          - "  ansible-playbook -i inventory/<site> check-env.yml      validate the inventory, contact nothing"
-          - "  ansible-playbook -i inventory/<site> undercluster.yml   node checks over SSH"
-          - "  ansible-playbook -i inventory/<site> kmetal.yml         platform checks and end-to-end tests"
-          - "  ansible-playbook -i inventory/<site> site.yml           both"
-          - "  ansible-playbook -i inventory/<site> cleanup.yml -e kmv_run_id=ID"
+          - "  ansible-playbook -i inventory/<site> playbooks/check-env.yml      validate the inventory, contact nothing"
+          - "  ansible-playbook -i inventory/<site> playbooks/undercluster.yml   node checks over SSH"
+          - "  ansible-playbook -i inventory/<site> playbooks/kmetal.yml         platform checks and end-to-end tests"
+          - "  ansible-playbook -i inventory/<site> playbooks/site.yml           both"
+          - "  ansible-playbook -i inventory/<site> playbooks/cleanup.yml -e kmv_run_id=ID"
           - ""
           - "  --tags g1,g2 / --skip-tags g1,g2   run or skip check groups"
           - "  -e kmv_kubeconfig=FILE  -e kmv_keep=true  -e kmv_force_e2e=true  -e kmv_timeout_cluster=45m"
           - ""
-          - "Check groups: ansible-playbook help.yml -e cmd=undercluster | -e cmd=kmetal"
+          - "Check groups: ansible-playbook playbooks/help.yml -e cmd=undercluster | -e cmd=kmetal"
       when: cmd | length == 0
 
     - name: Unknown command
@@ -45,7 +44,7 @@
           {%-   set _ = out.append('  %-13s %s' | format(g, kmv_help[cmd ~ ':' ~ g].splitlines()[0].split(' - ', 1)[1])) -%}
           {%- endfor -%}
           {%- set _ = out.append('') -%}
-          {%- set _ = out.append('Details: ansible-playbook help.yml -e cmd=' ~ cmd ~ ' -e group=<group>') -%}
+          {%- set _ = out.append('Details: ansible-playbook playbooks/help.yml -e cmd=' ~ cmd ~ ' -e group=<group>') -%}
           {%- set _ = out.append('Select:  --tags g1,g2 | --skip-tags g1,g2') -%}
           {{ out }}
       when: cmd in kmv_help_groups and group | length == 0

@@ -4,3 +4,4 @@ e2e_reports
 .venv/
 collections/
 inventory/poc/
+*kubeconfig

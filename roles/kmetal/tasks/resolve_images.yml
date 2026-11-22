@@ -3,7 +3,7 @@
 #   {tag: {name, phase, golden}}  - the OSArtifact in kmetal-image-builder built for each
 # tag, its phase and the phase of its <name>-golden PVC. No verdicts.
 
-- name: resolve images | OSArtifacts and golden PVCs
+- name: resolve images | Read the OSArtifacts and their golden PVCs
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl get osartifacts -n {{ kmv_ns_images }} -o json

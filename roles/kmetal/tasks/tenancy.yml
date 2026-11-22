@@ -3,7 +3,7 @@
 # namespace while impersonating a member of the first subject who owns no Tenant; Capsule
 # must reject it. The probe namespace is deleted right away.
 
-- name: tenancy | CapsuleConfigurations
+- name: tenancy | Read the CapsuleConfigurations
   ansible.builtin.command: kubectl get capsuleconfigurations -o json
   register: _tn_cc
   changed_when: false
@@ -25,7 +25,7 @@
       {{ [] }}
       {%- endif -%}
 
-- name: tenancy | create a namespace as a tenant member who owns no Tenant
+- name: tenancy | Try to create a namespace as a tenant member who owns no Tenant (Capsule must refuse)
   ansible.builtin.command:
     argv: "{{ ['kubectl', 'create', 'namespace', _tn_probe] + _tn_as }}"
   register: _tn_create
@@ -33,14 +33,14 @@
   failed_when: false
   when: _tn_as | length > 0
 
-- name: tenancy | read the probe namespace
+- name: tenancy | Read the probe namespace's tenant label
   ansible.builtin.command: kubectl get namespace {{ _tn_probe }} -o json
   register: _tn_ns
   changed_when: false
   failed_when: false
   when: _tn_create.rc | default(1) == 0
 
-- name: tenancy | delete the probe namespace
+- name: tenancy | Delete the probe namespace
   ansible.builtin.command: kubectl delete namespace {{ _tn_probe }} --ignore-not-found --wait=false
   changed_when: true
   failed_when: false

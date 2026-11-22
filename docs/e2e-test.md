@@ -11,9 +11,9 @@ prove that networks using the **same** CIDR stay isolated.
 | `e2e-tenants` | **Two tenants** (`t1`, `t2`), one environment and one cluster each | Multi-tenancy segregation: neither tenant owner can act on the other tenant, and the two VPCs on the same CIDR do not exchange traffic |
 
 ```bash
-ansible-playbook -i inventory/<site> kmetal.yml --tags e2e,e2e-tenants                  # both scenarios
-ansible-playbook -i inventory/<site> kmetal.yml --tags e2e-tenants                      # multi-tenancy only
-ansible-playbook -i inventory/<site> kmetal.yml --tags e2e,e2e-tenants -e kmv_keep=true # keep for inspection
+ansible-playbook -i inventory/<site> playbooks/kmetal.yml --tags e2e,e2e-tenants                  # both scenarios
+ansible-playbook -i inventory/<site> playbooks/kmetal.yml --tags e2e-tenants                      # multi-tenancy only
+ansible-playbook -i inventory/<site> playbooks/kmetal.yml --tags e2e,e2e-tenants -e kmv_keep=true # keep for inspection
 ```
 
 Both groups are skipped when an earlier platform group failed (override:
@@ -111,8 +111,9 @@ All clusters of all selected scenarios are waited for together, by a single task
 every 15 seconds (`until`), up to `kmv_timeout_cluster` (default 30 minutes).
 - A cluster is up when an `Available` or `Ready` condition is True and as many Machines as
   workers are `Running`.
-- Each poll shows as a `FAILED - RETRYING` line: that is Ansible counting down the retries, not
-  an error.
+- While it waits, the output shows `... still waiting (attempt N of M)` at the first attempt and
+  every tenth (with `-v`, Ansible's `FAILED - RETRYING` lines: retries counting down, not
+  errors).
 - On timeout, the clusters, control planes, machines, VMIs and recent events of each cluster
   that did not come up are printed. The clusters that did come up are still tested.
 
@@ -211,7 +212,7 @@ after Ctrl-C:
    the test created it;
 6. the Tenants and their ServiceAccounts.
 
-After Ctrl-C, run `cleanup.yml -e kmv_run_id=<id>`.
+After Ctrl-C, run `playbooks/cleanup.yml -e kmv_run_id=<id>`.
 
 See [Resources and cleanup](resources-and-cleanup.md).
 

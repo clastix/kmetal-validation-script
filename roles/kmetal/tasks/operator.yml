@@ -1,12 +1,15 @@
 ---
-# operator: the kmetal-operator Helm release (or, for a GitOps install, the Flux HelmRelease
-# in kmetal-flux), its chart version against the validated kMetal release, its pods, the
-# Flux objects in kmetal-flux and pods anywhere in the cluster.
+# operator: the kmetal-operator Helm release in kmetal-operator-system or kmetal-flux (or,
+# for a GitOps install, the Flux HelmRelease object in kmetal-flux), its chart version against
+# the validated kMetal release, its pods, the Flux objects in kmetal-flux and pods anywhere in
+# the cluster.
 
-- name: operator | Helm release and Flux HelmReleases
+- name: operator | Read the Helm releases in {{ kmv_operator_namespace }} and {{ kmv_ns_flux }}, and the Flux HelmReleases
   ansible.builtin.command: "{{ item }}"
   loop:
-    - helm list -n {{ kmv_operator_namespace }} -a -o json
+    # Every release state, with flags both Helm 3 and Helm 4 accept (Helm 4 dropped -a/--all).
+    - helm list -n {{ kmv_operator_namespace }} --deployed --failed --pending --superseded --uninstalling -o json
+    - helm list -n {{ kmv_ns_flux }} --deployed --failed --pending --superseded --uninstalling -o json
     - kubectl get helmreleases.helm.toolkit.fluxcd.io -n {{ kmv_ns_flux }} -o json
   register: _op_read
   changed_when: false
@@ -15,16 +18,26 @@
 - name: operator | locate the operator
   ansible.builtin.set_fact:
     _op: >-
-      {%- set rel = (_op_read.results[0].stdout | default('[]', true) | from_json) | selectattr('name', 'eq', kmv_operator_release) | first | default({}) -%}
-      {%- set hrs = (_op_read.results[1].stdout | from_json)['items'] if _op_read.results[1].rc == 0 else [] -%}
+      {%- set rels = [] -%}
+      {%- for r in _op_read.results[:2] if r.rc == 0 -%}
+      {%-   for x in r.stdout | default('[]', true) | from_json -%}{%- set _ = rels.append(x) -%}{%- endfor -%}
+      {%- endfor -%}
+      {%- set rel = {} -%}
+      {#- the operator namespace is listed first: a release named kmetal-operator, named
+          <namespace>-kmetal-operator (Flux helm-controller naming), or of the kmetal-operator chart -#}
+      {%- for x in rels if not rel and (x.name == kmv_operator_release or x.name.endswith('-' ~ kmv_operator_release)
+                                         or x.chart is match('^' ~ (kmv_operator_chart | regex_escape) ~ '-v?[0-9]')) -%}
+      {%-   set _ = rel.update(x) -%}
+      {%- endfor -%}
+      {%- set hrs = (_op_read.results[2].stdout | from_json)['items'] if _op_read.results[2].rc == 0 else [] -%}
       {%- set hr = {} -%}
       {%- for h in hrs if not hr and (h.metadata.name == kmv_operator_release or h.spec.releaseName | default('') == kmv_operator_release
-                                        or h.spec.chart.spec.chart | default('') == kmv_operator_release) -%}
+                                        or h.spec.chart.spec.chart | default('') == kmv_operator_chart) -%}
       {%-   set _ = hr.update(h) -%}
       {%- endfor -%}
       {%- if rel -%}
-      {{ {'how': 'helm', 'status': rel.status, 'chart': rel.chart, 'ns': kmv_operator_namespace,
-          'version': rel.chart | regex_replace('^' ~ (kmv_operator_release | regex_escape) ~ '-', '')} }}
+      {{ {'how': 'helm', 'name': rel.name, 'status': rel.status, 'chart': rel.chart, 'ns': rel.namespace,
+          'version': rel.chart | regex_replace('^' ~ (kmv_operator_chart | regex_escape) ~ '-', '')} }}
       {%- elif hr -%}
       {{ {'how': 'flux', 'name': hr.metadata.name, 'ready': hr | kmv_condition('Ready') or 'Unknown',
           'ns': hr.spec.targetNamespace | default(hr.metadata.namespace),
@@ -33,7 +46,7 @@
       {{ {'how': 'none', 'ns': kmv_operator_namespace, 'version': ''} }}
       {%- endif -%}
 
-- name: operator | pods and Flux objects
+- name: operator | Read the operator pods, every Flux object in {{ kmv_ns_flux }} and every pod of the cluster
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl get pods -n {{ _op.ns }} -o json
@@ -53,13 +66,13 @@
       {%- set t = kmv_target_kmetal -%}
       {%- if _op.how == 'helm' -%}
       {%-   set _ = v.append({'level': 'PASS' if _op.status == 'deployed' else 'FAIL',
-                            'msg': 'helm release ' ~ kmv_operator_release ~ ' is ' ~ _op.status ~ ' (' ~ _op.chart ~ ')'}) -%}
+                            'msg': 'helm release ' ~ _op.ns ~ '/' ~ _op.name ~ ' is ' ~ _op.status ~ ' (' ~ _op.chart ~ ')'}) -%}
       {%- elif _op.how == 'flux' -%}
       {%-   set _ = v.append({'level': 'PASS', 'msg': 'operator installed by Flux: HelmRelease ' ~ kmv_ns_flux ~ '/' ~ _op.name
                               ~ ' (Ready=' ~ _op.ready ~ ', target namespace ' ~ _op.ns ~ ')'}) -%}
       {%- else -%}
-      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'operator not found: no helm release ' ~ kmv_operator_release ~ ' in ' ~ kmv_operator_namespace
-                              ~ ', no HelmRelease ' ~ kmv_operator_release ~ ' in ' ~ kmv_ns_flux}) -%}
+      {%-   set _ = v.append({'level': 'FAIL', 'msg': 'operator not found: no helm release of chart ' ~ kmv_operator_chart ~ ' in ' ~ kmv_operator_namespace
+                              ~ ' or ' ~ kmv_ns_flux ~ ', no HelmRelease ' ~ kmv_operator_release ~ ' in ' ~ kmv_ns_flux}) -%}
       {%- endif -%}
       {%- if _op.how != 'none' -%}
       {%-   set ver = _op.version | regex_replace('^v', '') -%}

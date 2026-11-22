@@ -1,11 +1,10 @@
 ---
 # Validate the inventory and print the node table. Contacts no node and no cluster.
 #
-#   ansible-playbook -i inventory/<site> check-env.yml
+#   ansible-playbook -i inventory/<site> playbooks/check-env.yml
 
-- name: check-env
+- name: Inventory check - validate the site description, contact nothing
   hosts: localhost
-  connection: local
   gather_facts: false
   roles:
     - common
@@ -14,3 +13,4 @@
       ansible.builtin.import_role:
         name: common
         tasks_from: validate
+      tags: [inventory]

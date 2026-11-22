@@ -2,14 +2,14 @@
 # The SubnetClaims of environments _k1 and _k2 are two distinct Kube-OVN subnets with the
 # same CIDR in different VPCs.
 
-- name: subnets | derived Kube-OVN subnets of {{ _k1 }} and {{ _k2 }}
+- name: subnets | Read the Kube-OVN subnets behind the SubnetClaims of {{ _k1 }} and {{ _k2 }}
   ansible.builtin.command: kubectl get subnetclaims.network.kmetal.io primary -n {{ _e2e_envs[item].ns }}
   loop: ["{{ _k1 }}", "{{ _k2 }}"]
   register: _sn_claims
   changed_when: false
   failed_when: false
 
-- name: subnets | read the Kube-OVN subnets
+- name: subnets | Read their CIDR and VPC
   ansible.builtin.command: kubectl get subnets.kubeovn.io {{ item.stdout | default('') | kmv_table_col('SUBNET') }} -o json
   loop: "{{ _sn_claims.results }}"
   loop_control:

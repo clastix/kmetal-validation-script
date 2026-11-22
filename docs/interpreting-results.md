@@ -34,18 +34,19 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 | `no Ready MetalLB speaker on this spec.placement node` (WARN) | Speaker DaemonSet not scheduled there (label, taint or node selector) | `kubectl get ds -n kmetal-metallb`; check `spec.placement`, tolerations and the exclusion label |
 | `no IPAddressPool tenant-cp-pool` | The operator did not create the pool from `loadBalancer.tenantControlPlanes` | Check the KMetal components and the operator logs; tenant control planes get no address until it exists |
 | `component X is Pending/Failed: …` | The first non-Ready component blocks the ones after it | Read the message; check the Flux object of that component in `kmetal-flux` |
-| `operator not found` | Installed under another release or namespace | Set `kmv_operator_release` / `kmv_operator_namespace` |
+| `operator not found` | Installed in another namespace, or from a renamed chart | `helm list -A \| grep kmetal`; set `kmv_operator_namespace`, `kmv_operator_release` or `kmv_operator_chart` |
 | `operator chart is X; these playbooks validate kMetal 1.0.1` (WARN) | Different kMetal version | Results may not match that version's rules; interpret them with care |
 | `loadBalancer.<role> … is not in any IPAddressPool` | Spec and MetalLB pools drifted | Let the operator reconcile, or fix the spec |
 | `Service from pool … got no EXTERNAL-IP` | Pool exhausted, or the MetalLB controller is unhealthy | `kubectl get ipaddresspool -n kmetal-metallb -o yaml`; free addresses |
 | `no VolumeSnapshotClass for driver …` | CSI driver without snapshot support, or the class is missing | Install the snapshot class for the platform storage driver |
-| `StorageProfile … has no snapshotClass` | CDI does not recognise the provisioner | Patch the StorageProfile with the snapshot class and the clone strategy |
+| `StorageProfile … has no snapshotClass` | No VolumeSnapshotClass on the platform class's driver; or one exists but CDI never refreshed the profile, because the snapshot CRDs were installed after the CDI controller started (the message compares the times) | Create the snapshot class; for a stale profile, `kubectl rollout restart deployment/cdi-deployment -n system-cdi`, or set `spec.snapshotClass` on the StorageProfile |
 | `volume restored from a … snapshot is not usable` | The driver restores snapshots read-only | FAIL when the StorageProfile clones by snapshot: use another backend for the platform class, or a `copy` clone strategy |
 | `<class>: PVC/pod smoke test did not complete` | Provisioning failure, or the pod cannot be scheduled (e.g. a node-local class on nodes without its path) | Read the PVC events printed under the message |
 | `no node labelled node-role.kubernetes.io/compute` | Labels not applied; the platform still reports healthy | `kubectl label node <n> node-role.kubernetes.io/compute=` |
 | `no node labelled node-role.kubernetes.io/network=` | Network nodes not labelled; on an upgrade from 1.0.0, the `kmetal.io/ovn` label was not replaced | `kubectl label node <n> node-role.kubernetes.io/network=` on every node carrying the overlay |
 | `node-role.kubernetes.io/network=true; the value must be empty` | Labelled with a value; Kube-OVN's DaemonSets match only the empty value | `kubectl label node <n> --overwrite node-role.kubernetes.io/network=` |
-| `labelled kmetal.io/ovn but not node-role.kubernetes.io/network` (WARN) | Missed relabel at the upgrade to 1.0.1 | Add the network label; then remove `kmetal.io/ovn` |
+| `kmetal.io/ovn=true missing on a network node` | The kMetal 1.0.1 operator no longer sets it, but the kmetal-networking agent DaemonSet selects it: the agent runs nowhere and tenant workers never join | `kubectl label node <worker> kmetal.io/ovn=true` on every network node |
+| `kmetal-networking agent … is scheduled on no node` | No node matches the agent's nodeSelector | Label the network nodes as the message shows |
 | `ovn.kubernetes.io/external-gw=true missing` | The operator's node labelling controller did not apply it | Check the operator logs and that the node carries the network label |
 | `kube-ovn/role=master missing on a central node` | The operator's node labelling controller did not apply it | Check the operator logs and the `centralNodes` names |
 | `control plane labelled node-role.kubernetes.io/network` (WARN) | Kube-OVN per-node components scheduled on a control plane without overlay | `kubectl label node <n> node-role.kubernetes.io/network-` |
@@ -65,7 +66,8 @@ group's full rules are in [Under cluster checks](undercluster-checks.md) and
 | `end-to-end tests skipped: N failures above` | An earlier platform group failed | Fix those first, or use `-e kmv_force_e2e=true` |
 | `the owner of <t1> is allowed on tenant <t2>: …` | A ClusterRole or RoleBinding grants tenant owners rights beyond their own tenant (e.g. a broad aggregated role, or a binding to the whole tenant group) | Find the binding with `kubectl auth can-i --list --as <owner>`; scope it to the tenant's own namespaces. Multi-tenancy is broken until fixed |
 | `the owner of <t> cannot read pods in its own environment` (WARN) | Capsule does not grant the owner's admin role in its namespaces | Check the Tenant's `owners` and Capsule's additional role bindings |
-| `FAILED - RETRYING: … (N retries left)` | Not a check result: Ansible polling (pods, claims, clusters) | Nothing; wait. A verdict follows when the poll ends |
+| `... still waiting (attempt N of M)` (with `-v`: `FAILED - RETRYING: … (N retries left)`) | Not a check result: a step polling for a pod, a claim or a cluster | Nothing; wait. A verdict follows when the wait ends |
+| `ERROR on <host>, step "…"` | A step failed in a way no check expected, and the playbook stopped | Read the message; rerun with `-v` for the step's full result |
 | `isolation <x> -> <y> not probed` (INFO) | Both clusters use the same worker addresses | Expected for one direction; keep different worker counts so the other direction is probed |
 | `e2e needs a multiTenancy Group system:serviceaccounts:<namespace>` | Tenancy uses users or another group form | Add such a group to `spec.multiTenancy.users` |
 | `owner of <t> cannot create environment` | Capsule rejected the owner, e.g. a forced namespace prefix or a namespace quota | Check the Tenant and the CapsuleConfiguration users |

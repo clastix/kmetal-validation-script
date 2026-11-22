@@ -5,15 +5,16 @@
 #   2. EipClaims, SubnetClaims, VpcClaims
 #   3. namespaces (test, environments, the owners' namespace if the run created it)
 #   4. Capsule Tenants, then the owner ServiceAccounts
-# Used at the end of kmetal.yml and by cleanup.yml.
+# Used at the end of kmetal.yml (leftovers: WARN) and by cleanup.yml (leftovers: FAIL, the
+# playbook's only purpose; set with _cl_left_level).
 
-- name: cleanup | delete the tenant Clusters of run {{ _cl_rid }}
+- name: cleanup | Delete the tenant Clusters of run {{ _cl_rid }}; their VMs and control planes go with them
   ansible.builtin.command: kubectl delete clusters.cluster.x-k8s.io -A -l {{ kmv_label_key }}={{ _cl_rid }} --wait=false
   register: _cl_clusters
   changed_when: "'deleted' in _cl_clusters.stdout"
   failed_when: false
 
-- name: cleanup | wait until the Clusters are gone (up to 20m)
+- name: cleanup | Wait until those Clusters are gone (up to 20 min)
   ansible.builtin.command: kubectl get clusters.cluster.x-k8s.io -A -l {{ kmv_label_key }}={{ _cl_rid }} -o name
   register: _cl_left
   until: _cl_left.rc != 0 or _cl_left.stdout | length == 0
@@ -23,7 +24,7 @@
   failed_when: false
   when: "'deleted' in _cl_clusters.stdout"
 
-- name: cleanup | delete claims, namespaces, Tenants and ServiceAccounts
+- name: cleanup | Delete the run's EipClaims, SubnetClaims, VpcClaims, namespaces, Tenants and ServiceAccounts
   ansible.builtin.command: "{{ item }}"
   loop:
     - kubectl delete eipclaims.network.kmetal.io -A -l {{ kmv_label_key }}={{ _cl_rid }} --wait=true --timeout=300s
@@ -38,7 +39,7 @@
   changed_when: "'deleted' in _cl_del.stdout"
   failed_when: false
 
-- name: cleanup | what is left
+- name: cleanup | List whatever of the run is still present
   ansible.builtin.command: kubectl get clusters.cluster.x-k8s.io,namespaces,tenants.capsule.clastix.io -A -l {{ kmv_label_key }}={{ _cl_rid }} -o name
   register: _cl_final
   changed_when: false
@@ -52,8 +53,8 @@
       {%- if _cl_final.rc != 0 -%}
       {{ [{'level': 'WARN', 'msg': 'cannot list what is left of run ' ~ _cl_rid ~ ': ' ~ _cl_final.stderr | truncate(200)}] }}
       {%- elif left -%}
-      {{ [{'level': 'WARN', 'msg': 'still present after cleanup of run ' ~ _cl_rid ~ ': ' ~ left | join(' ')
-                                   ~ ' (rerun: ansible-playbook -i <inventory> cleanup.yml -e kmv_run_id=' ~ _cl_rid ~ ')'}] }}
+      {{ [{'level': _cl_left_level | default('WARN'), 'msg': 'still present after cleanup of run ' ~ _cl_rid ~ ': ' ~ left | join(' ')
+                                   ~ ' (rerun: ansible-playbook -i <inventory> playbooks/cleanup.yml -e kmv_run_id=' ~ _cl_rid ~ ')'}] }}
       {%- else -%}
       {{ [{'level': 'PASS', 'msg': 'nothing labelled ' ~ kmv_label_key ~ '=' ~ _cl_rid ~ ' is left'}] }}
       {%- endif -%}

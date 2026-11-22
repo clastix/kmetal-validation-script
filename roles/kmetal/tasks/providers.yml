@@ -6,7 +6,7 @@
 # exists (VPC external access); over SSH the interface is on every network node not in
 # excludeNodes, has carrier and no IPv4.
 
-- name: providers | nodes
+- name: providers | Read the nodes, to find the network nodes
   ansible.builtin.command: kubectl get nodes -o json
   register: _pv_nodes
   changed_when: false
@@ -33,7 +33,7 @@
       {%- endif -%}
       {{ out }}
 
-- name: providers | interface on the network nodes (SSH)
+- name: providers | Inspect each provider interface on each network node over SSH (ip link, ip addr)
   ansible.builtin.shell: |
     ip -d -j link show dev {{ item.iface | quote }} 2>/dev/null || echo '[]'
     ip -j -4 addr show dev {{ item.iface | quote }} 2>/dev/null || echo '[]'

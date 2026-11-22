@@ -19,7 +19,7 @@
       {%- endfor -%}
       {{ out }}
 
-- name: mesh | ping the peers  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
+- name: mesh | Ping every peer address on each shared network (plus a jumbo frame when MTU > 1500)  # noqa: risky-shell-pipe  (best-effort probes; every line reports its own result)
   ansible.builtin.shell: |
     {% for p in _uc_mesh_probes %}
     {% if p.kind == 'mesh' %}

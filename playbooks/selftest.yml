@@ -1,11 +1,10 @@
 ---
 # Tests of the IP arithmetic and parsing filters (filter_plugins/kmv.py). Contacts nothing.
 #
-#   ansible-playbook selftest.yml
+#   ansible-playbook playbooks/selftest.yml
 
-- name: selftest
+- name: Self-test of the IP and parsing filters
   hosts: localhost
-  connection: local
   gather_facts: false
   tasks:
     - name: IPv4 filters
@@ -55,3 +54,34 @@
           - "{'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}} | kmv_ready"
           - "{'status': {'phase': 'Running', 'containerStatuses': [{'ready': true}]}} | kmv_pod_ok"
         success_msg: Parsing filters OK
+
+    - name: Readiness parser (JSON, marker line, kubectl table)
+      vars:
+        _ready_json: |
+          {
+              "status": {
+                  "conditions": [{"type": "Ready", "status": "True"}]
+              }
+          }
+          @@table@@
+          NAME   READY
+          main   True
+        _ready_table_only: |
+          @@table@@
+          NAME   READY   V4
+          main   True    10.0.0.5
+        _pending: |
+          {"status": {"conditions": [{"type": "Ready", "status": "False", "message": "waiting"}]}}
+          @@table@@
+          NAME   READY
+          main   False
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - (_ready_json | kmv_ready_output).ready
+          - (_ready_table_only | kmv_ready_output).ready
+          - not ('' | kmv_ready_output).ready
+          - not ('Error from server (NotFound)' | kmv_ready_output).ready
+          - not (_pending | kmv_ready_output).ready
+          - (_pending | kmv_ready_output).status.conditions[0].message == 'waiting'
+        success_msg: Readiness parser OK

@@ -50,7 +50,7 @@
     _port: "{{ kmv_encap_test_port | int + (1 if _uc_tt == 'vxlan' else 0) }}"
     _extra: "{{ ('dstport ' ~ _port ~ ' dev ' ~ kmv_networks.overlay.interface) if _uc_tt == 'vxlan' else ('dstport ' ~ _port) }}"
   block:
-    - name: encap | create kvtest0 on both ends
+    - name: encap | Create the test tunnel kvtest0 on both nodes (deleted right after)
       ansible.builtin.shell: >-
         ip link del kvtest0 2>/dev/null;
         ip link add kvtest0 type {{ _uc_tt }} id 4242 remote {{ _peer_ip }} {{ _extra }}
@@ -59,7 +59,7 @@
       changed_when: true
       failed_when: false
 
-    - name: encap | ping across the tunnel
+    - name: encap | Ping across the tunnel
       ansible.builtin.command: ping -c3 -i0.2 -W1 -q 169.254.250.2
       register: _uc_ping
       changed_when: false
@@ -83,7 +83,7 @@
       when: inventory_hostname == _uc_pair[0]
 
   always:
-    - name: encap | delete kvtest0
+    - name: encap | Delete kvtest0
       ansible.builtin.command: ip link del kvtest0
       changed_when: true
       failed_when: false

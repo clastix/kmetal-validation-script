@@ -27,7 +27,7 @@
       {%- for v in _kmv_fails -%}{%- set _ = out.append('FAIL [' ~ v.group ~ '] ' ~ v.msg) -%}{%- endfor -%}
       {%- for v in _kmv_warns -%}{%- set _ = out.append('WARN [' ~ v.group ~ '] ' ~ v.msg) -%}{%- endfor -%}
       {%- if kmv_keep | bool and kmv_created | default(false) -%}
-      {%-   set _ = out.append('Test resources kept. Remove them with: ansible-playbook -i <inventory> cleanup.yml -e kmv_run_id=' ~ kmv_rid | default('?')) -%}
+      {%-   set _ = out.append('Test resources kept. Remove them with: ansible-playbook -i <inventory> playbooks/cleanup.yml -e kmv_run_id=' ~ kmv_rid | default('?')) -%}
       {%- endif -%}
       {{ out }}
 

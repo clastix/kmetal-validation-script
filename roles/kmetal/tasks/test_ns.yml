@@ -2,7 +2,7 @@
 # Creates the run's temporary namespace kmetal-validate-<run ID> once. The cleanup role
 # deletes it through its run-ID label.
 
-- name: test namespace | create kmetal-validate-{{ kmv_rid }}
+- name: test namespace | Create the namespace kmetal-validate-{{ kmv_rid }} for the smoke tests (deleted at the end)
   kubernetes.core.k8s:
     state: present
     definition:

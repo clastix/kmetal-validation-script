@@ -1,5 +1,5 @@
 ---
-# Help text of every check group, shown by help.yml. The first line of each text is
+# Help text of every check group, shown by playbooks/help.yml. The first line of each text is
 # "group - summary"; help.yml lists the groups with that summary.
 
 kmv_help_groups:
@@ -7,8 +7,52 @@ kmv_help_groups:
   kmetal: [platform, operator, metallb, storage, nodes, providers, tenancy, capi, kubevirt, crds, e2e, e2e-tenants]
 
 kmv_help_commands:
-  undercluster: "undercluster.yml - compare the nodes with the inventory over SSH (sudo)"
-  kmetal: "kmetal.yml - platform checks and end-to-end tests against the under cluster API"
+  undercluster: "playbooks/undercluster.yml - compare the nodes with the inventory over SSH (sudo)"
+  kmetal: "playbooks/kmetal.yml - platform checks and end-to-end tests against the under cluster API"
+
+# Shown by the output plugin (callback_plugins/kmv_output.py) as the title of each playbook.
+kmv_help_playbooks:
+  check-env.yml: validate the inventory and print the node table; contacts nothing
+  undercluster.yml: compare every node with the inventory over SSH; read-only, except a test tunnel that lives a few seconds
+  kmetal.yml: platform checks against the under cluster API, then the end-to-end tests; test objects are deleted at the end
+  site.yml: undercluster.yml, then kmetal.yml, with one final summary
+  cleanup.yml: delete what an interrupted or kept run left behind, by run ID
+  help.yml: what each check group tests
+  selftest.yml: tests of the IP arithmetic and parsing filters
+
+# Header of the steps that always run (not check groups), shown by the output plugin.
+kmv_help_sections:
+  prepare: |
+    prepare - run ID, inventory and access to the under cluster
+
+      Draws the run ID that labels every object this run creates, validates the inventory
+      and prints the node table (when the playbook uses an inventory), checks that the
+      under cluster API answers and reads the KMetal resource, the source of every expected
+      value. Changes nothing.
+
+      Stops the playbook when: invalid inventory; kmetal.yml or cleanup.yml cannot reach the API
+  inventory: |
+    inventory - validate the site description
+
+      Checks the networks, provider networks and nodes of the inventory, then prints the
+      node table. Contacts nothing.
+
+      Stops the playbook when: any error in the inventory (all errors are listed at once)
+  summary: |
+    summary - outcome of the run
+
+      Counts the verdicts of every host and repeats every FAIL and WARN with its check group.
+
+      Result: FAILED (exit code 2) when at least one check failed; otherwise no failures
+  cleanup: |
+    cleanup - delete what this run created
+
+      Deletes, by the label kmetal-validate/run-id=<run ID>: the tenant Clusters (waiting
+      until they are gone), then EipClaims, SubnetClaims, VpcClaims, namespaces, Tenants and
+      ServiceAccounts; in cleanup.yml also the kvtest0 test tunnel on the nodes.
+      Skipped with -e kmv_keep=true.
+
+      WARN  something is still present at the end of kmetal.yml (FAIL in cleanup.yml)
 
 kmv_help:
   undercluster:connectivity: |
@@ -144,14 +188,17 @@ kmv_help:
   kmetal:operator: |
     operator - kmetal-operator release, version and Flux delivery
 
-      Finds the operator as the Helm release kmetal-operator in kmetal-operator-system,
-      or else as a Flux HelmRelease in kmetal-flux (GitOps install). Checks its chart
+      Finds the operator as a Helm release in kmetal-operator-system, then kmetal-flux:
+      named kmetal-operator, <namespace>-kmetal-operator (Flux naming), or installing the
+      kmetal-operator chart (any release state; works with Helm 3 and Helm 4). Without
+      one, a Flux HelmRelease object in kmetal-flux (GitOps install). Checks its chart
       version against kMetal 1.0.1, its pods, every HelmRelease, Kustomization and
       OCIRepository in kmetal-flux, and pods anywhere in the cluster.
 
       PASS  Helm release deployed, or Flux HelmRelease present; chart 1.0.1 or a 1.0.1
             pre-release (with an INFO)
-      FAIL  operator not found; operator pods not ready; a Flux object not Ready
+      FAIL  operator not found; release not deployed; operator pods not ready; a Flux
+            object not Ready
       WARN  chart version not 1.0.1; pods outside Running/Completed elsewhere
       Needs kubeconfig
 
@@ -175,10 +222,12 @@ kmv_help:
     storage - storage classes, snapshots and live volumes
 
       underclusterClassName and tenantClassName must exist and differ, etcdClassName
-      exists if set. The VolumeSnapshotClass must use the platform class's driver and
-      the CDI StorageProfile must name it. Smoke tests: per class, a 1 Gi PVC and a
-      write/read pod placed where the real consumer runs (compute nodes; spec.placement
-      for etcd); then snapshot the platform volume, restore it and WRITE to the copy.
+      exists if set. Only underclusterClassName needs a VolumeSnapshotClass: the one named
+      in clusterClass.values.dataVolume, else its driver's default; its CDI StorageProfile
+      must name it (an empty one is explained when CDI missed the class). Smoke tests:
+      per class, a 1 Gi PVC and a write/read pod placed where the real consumer runs
+      (compute nodes; spec.placement for etcd); then snapshot the platform volume,
+      restore it and WRITE to the copy.
 
       FAIL  class missing; no snapshot class; empty StorageProfile snapshotClass;
             PVC/pod or snapshot fails; restore not writable with cloneStrategy=snapshot
@@ -192,18 +241,18 @@ kmv_help:
       operator removes it). Compute: node-role.kubernetes.io/compute, with a Ready
       virt-handler. Network nodes: node-role.kubernetes.io/network with an EMPTY value
       (never control planes), ovn.kubernetes.io/external-gw=true (set by the operator),
-      a Ready kube-ovn-cni, and the tunnelInterface (over SSH with an inventory).
-      centralNodes: each labelled kube-ovn/role=master by the operator; ideally the
-      three control planes. kmetal.io/ovn is no longer read.
+      a Ready kube-ovn-cni, the tunnelInterface (over SSH with an inventory), and the
+      labels the kmetal-networking agent DaemonSet selects (kmetal.io/ovn=true; the
+      operator no longer sets it) with a Ready agent pod: without it tenant workers never
+      join. centralNodes: each labelled kube-ovn/role=master by the operator; ideally the
+      three control planes.
 
       FAIL  exclusion label on a control plane; no compute or network node; network
-            label with a value; missing external-gw, kube-ovn-cni, tunnel interface or
-            kube-ovn/role=master
-      WARN  network label on a control plane; kmetal.io/ovn without the network label;
-            a worker in centralNodes; fewer than three control planes used while
-            available; fewer than 3 or an even number of central nodes;
-            kube-ovn/role=master outside centralNodes
-      INFO  kmetal.io/ovn left on a network node (can be removed)
+            label with a value; missing external-gw, kube-ovn-cni, tunnel interface,
+            kmetal.io/ovn=true, networking agent or kube-ovn/role=master
+      WARN  network label or kmetal.io/ovn on a control plane; a worker in centralNodes;
+            fewer than three control planes used while available; fewer than 3 or an
+            even number of central nodes; kube-ovn/role=master outside centralNodes
       Needs kubeconfig; inventory optional
 
   kmetal:providers: |

@@ -13,13 +13,13 @@
   ansible.builtin.import_tasks: validate.yml
   when: kmv_need_env | default(false) or kmv_have_env
 
-- name: prepare | under cluster API
+- name: prepare | Check that the under cluster API answers
   ansible.builtin.command: kubectl get --raw /readyz --request-timeout=10s
   register: _kmv_readyz
   changed_when: false
   failed_when: false
 
-- name: prepare | read the KMetal resource
+- name: prepare | Read the KMetal resource, the source of every expected value
   ansible.builtin.command: kubectl get km -o json --request-timeout=30s
   register: _kmv_kmget
   changed_when: false
@@ -52,4 +52,4 @@
       - "inventory: {{ (kmv_nodes | default([]) | length) ~ ' nodes' if kmv_have_env else 'no nodes' }}"
       - "under cluster API: {{ 'reachable (' ~ kmv_kubeconfig ~ ')' if kmv_have_kube else 'not reachable' }}; KMetal resource: {{ kmv_km.metadata.name | default('none') }}"
       - "Kube-OVN central nodes: {{ kmv_central | join(' ') if kmv_central | length > 0 else 'unknown' }}"
-      - "Leftovers of an interrupted run: ansible-playbook -i <inventory> cleanup.yml -e kmv_run_id={{ kmv_rid }}"
+      - "Leftovers of an interrupted run: ansible-playbook -i <inventory> playbooks/cleanup.yml -e kmv_run_id={{ kmv_rid }}"

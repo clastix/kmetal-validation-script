@@ -10,7 +10,7 @@
 - name: isolation {{ _src }} -> {{ _dst }} | probe
   when: _src in _e2e_tk and _iso_target | length > 0
   block:
-    - name: isolation {{ _src }} -> {{ _dst }} | pod iso-{{ _dst }} curls {{ _iso_target }}:10250
+    - name: isolation {{ _src }} -> {{ _dst }} | Start a pod that tries {{ _iso_target }}:10250, an address only {{ _dst }} uses (it must not answer)
       ansible.builtin.command:
         argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_src] | default({})).kc | default('') }}", apply, -f, "-"]
         stdin: >-
@@ -23,7 +23,7 @@
       changed_when: true
       failed_when: false
 
-    - name: isolation {{ _src }} -> {{ _dst }} | wait for iso-{{ _dst }}
+    - name: isolation {{ _src }} -> {{ _dst }} | Wait for that pod (up to 2 min)
       ansible.builtin.command:
         argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_src] | default({})).kc | default('') }}", get, pod, "iso-{{ _dst }}", -n, kmetal-validate, -o, "jsonpath={.status.phase}"]
       delegate_to: "{{ (_e2e_tk[_src] | default({})).host | default('localhost') }}"

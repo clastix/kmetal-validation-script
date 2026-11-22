@@ -37,10 +37,13 @@ class ActionModule(ActionBase):
             clean.append({'group': group, 'level': v['level'], 'msg': str(v.get('msg', ''))})
 
         previous = (task_vars.get('ansible_facts') or {}).get('kmv_results') or []
-        # one coloured line per verdict, printed as the task runs
-        for v in clean:
-            display.display('  %-4s %s' % (v['level'], v['msg']), color=COLORS[v['level']])
+        # The kmv_output stdout callback prints the verdicts itself (under the group header);
+        # with any other output plugin, print one coloured line per verdict here.
+        if C.config.get_config_value('DEFAULT_STDOUT_CALLBACK') != 'kmv_output':
+            for v in clean:
+                display.display('  %-4s %s' % (v['level'], v['msg']), color=COLORS[v['level']])
         result['changed'] = False
         result['msg'] = '%d verdict(s)' % len(clean)
+        result['verdicts'] = clean            # the output plugin tallies them per group
         result['ansible_facts'] = {'kmv_results': list(previous) + clean}
         return result

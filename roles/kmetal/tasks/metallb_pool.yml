@@ -3,7 +3,7 @@
 # get an address inside the role's ranges, and answer HTTP from this machine or, failing
 # that, from the first control plane over SSH.
 
-- name: metallb | Service lb-{{ _pool.key | lower }} on pool {{ _pool.value }}
+- name: metallb | Create a LoadBalancer Service on pool {{ _pool.value }}
   kubernetes.core.k8s:
     state: present
     definition:
@@ -21,7 +21,7 @@
   register: _lb_svc_apply
   ignore_errors: true
 
-- name: metallb | wait for an EXTERNAL-IP from {{ _pool.value }}
+- name: metallb | Wait for an address from pool {{ _pool.value }} (up to 2 min)
   kubernetes.core.k8s_info:
     kind: Service
     name: "lb-{{ _pool.key | lower }}"
@@ -37,7 +37,7 @@
   ansible.builtin.set_fact:
     _lb_ip: "{{ ((_lb_svc.resources | default([{}]))[0].status.loadBalancer.ingress | default([{}]))[0].ip | default('') }}"
 
-- name: metallb | HTTP from this machine
+- name: metallb | Fetch http://<address>/ from this machine
   ansible.builtin.uri:
     url: "http://{{ _lb_ip }}/"
     timeout: 5
@@ -45,7 +45,7 @@
   failed_when: false
   when: _lb_ip | length > 0
 
-- name: metallb | HTTP from the first control plane
+- name: metallb | Fetch it from the first control plane over SSH
   ansible.builtin.uri:
     url: "http://{{ _lb_ip }}/"
     timeout: 5

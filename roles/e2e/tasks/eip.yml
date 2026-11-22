@@ -9,7 +9,7 @@
     _tk: "{{ ['kubectl', '--kubeconfig', _e2e_tk.a.kc] }}"
     _eip_ns: "{{ _e2e_envs.a.ns }}"
 
-- name: eip | EipClaim e2e
+- name: eip | Create the EipClaim e2e (type nat) in {{ _eip_ns }}
   kubernetes.core.k8s:
     state: present
     definition:
@@ -32,7 +32,7 @@
     _wr_retries: 36
   when: not (_eip_apply.failed | default(false))
 
-- name: eip | claim address
+- name: eip | Read the EipClaim's address
   ansible.builtin.command: kubectl get eipclaims.network.kmetal.io e2e -n {{ _eip_ns }}
   register: _eip_table
   changed_when: false
@@ -49,7 +49,7 @@
 - name: eip | Service web
   when: not (_eip_apply.failed | default(false)) and _wr_ok | default(false)
   block:
-    - name: eip | Deployment and LoadBalancer Service web in the tenant cluster
+    - name: eip | Create an nginx Deployment and a LoadBalancer Service bound to the EipClaim, in the tenant cluster
       ansible.builtin.command:
         argv: "{{ _tk + ['apply', '-f', '-'] }}"
         stdin: >-
@@ -71,7 +71,7 @@
       ansible.builtin.set_fact:
         _e2e_eip_applied: true
 
-    - name: eip | wait for the EXTERNAL-IP
+    - name: eip | Wait for the Service's EXTERNAL-IP (up to 5 min)
       ansible.builtin.command:
         argv: "{{ _tk + ['get', 'svc', 'web', '-n', 'kmetal-validate', '-o', 'jsonpath={.status.loadBalancer.ingress[0].ip}'] }}"
       delegate_to: "{{ _e2e_tk.a.host }}"
@@ -83,7 +83,7 @@
       changed_when: false
       failed_when: false
 
-    - name: eip | BOUND column and backend rollout
+    - name: eip | Read whether the EipClaim is bound; wait for the nginx backend
       ansible.builtin.command: "{{ item.argv }}"
       delegate_to: "{{ item.host }}"
       ignore_unreachable: true
@@ -97,7 +97,7 @@
       failed_when: false
       when: _eip_ext.stdout | default('') | length > 0
 
-    - name: eip | HTTP from this machine
+    - name: eip | Fetch http://<EIP>/ from this machine
       ansible.builtin.uri:
         url: "http://{{ _eip_ext.stdout }}/"
         timeout: 5
@@ -105,7 +105,7 @@
       failed_when: false
       when: _eip_ext.stdout | default('') | length > 0 and kmv_eip_probe_from == 'local'
 
-    - name: eip | HTTP from {{ kmv_eip_probe_from }}
+    - name: eip | Fetch http://<EIP>/ from {{ kmv_eip_probe_from }}
       ansible.builtin.uri:
         url: "http://{{ _eip_ext.stdout }}/"
         timeout: 5

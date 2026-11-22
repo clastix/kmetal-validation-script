@@ -2,7 +2,7 @@
 # internet: on each network of the node, curl the probe URL and ping the probe IP bound to
 # the network's interface; only kmv_internet_network may succeed. Plus a DNS lookup.
 
-- name: internet | probe each network
+- name: internet | On each network, fetch the probe URL and ping the probe IP bound to its interface; resolve the DNS probe
   ansible.builtin.shell: |
     if getent hosts {{ kmv_dns_probe | quote }} >/dev/null; then echo "dns - ok"; else echo "dns - fail"; fi
     {% for net, cfg in kmv_networks.items() if net in kmv_addresses %}

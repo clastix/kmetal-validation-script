@@ -3,7 +3,7 @@
 # A read-only restore is a FAIL when the StorageProfile clones by snapshot (tenant root
 # disks would fail), a WARN otherwise.
 
-- name: storage | VolumeSnapshot snap-uc
+- name: storage | Snapshot the platform-class PVC
   kubernetes.core.k8s:
     state: present
     definition:
@@ -16,7 +16,7 @@
   register: _st_snap_apply
   ignore_errors: true
 
-- name: storage | wait for snap-uc readyToUse
+- name: storage | Wait for the snapshot to be ready (up to 5 min)
   kubernetes.core.k8s_info:
     api_version: snapshot.storage.k8s.io/v1
     kind: VolumeSnapshot
@@ -41,7 +41,7 @@
 - name: storage | restore and write
   when: _st_snap.resources[0].status.readyToUse | default(false)
   block:
-    - name: storage | PVC pvc-restore from snap-uc and pod r-uc
+    - name: storage | Restore the snapshot into a new PVC and start a pod that writes to it
       kubernetes.core.k8s:
         state: present
         definition:
@@ -75,7 +75,7 @@
                 volumes: [{name: d, persistentVolumeClaim: {claimName: pvc-restore}}]
       failed_when: false
 
-    - name: storage | wait for r-uc
+    - name: storage | Wait for that pod (up to 5 min)
       kubernetes.core.k8s_info:
         kind: Pod
         name: r-uc

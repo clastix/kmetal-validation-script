@@ -3,7 +3,7 @@
 # the node list and InternalIPs compared with the cluster, and no control plane carrying
 # node.kubernetes.io/exclude-from-external-load-balancers.
 
-- name: topology | read the cluster nodes
+- name: topology | Read the cluster's nodes (needs a working kubeconfig)
   ansible.builtin.command: kubectl get nodes -o json
   register: _uc_knodes
   changed_when: false

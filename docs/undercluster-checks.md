@@ -3,7 +3,7 @@
 [← Index](README.md)
 
 ```bash
-ansible-playbook -i inventory/<site> undercluster.yml [--tags g1,g2] [--skip-tags g1,g2]
+ansible-playbook -i inventory/<site> playbooks/undercluster.yml [--tags g1,g2] [--skip-tags g1,g2]
 ```
 
 The playbook compares the real nodes with the inventory. It needs SSH and `sudo -n` on every
@@ -11,7 +11,7 @@ node. A kubeconfig is optional: when the under cluster API answers, the node lis
 address plan are also checked against the cluster and the `KMetal` resource.
 
 A short version of each group's section is built in:
-`ansible-playbook help.yml -e cmd=undercluster [-e group=<group>]`.
+`ansible-playbook playbooks/help.yml -e cmd=undercluster [-e group=<group>]`.
 
 ## How it works
 

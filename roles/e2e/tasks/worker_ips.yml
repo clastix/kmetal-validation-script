@@ -3,7 +3,7 @@
 # InternalIPs (when its API is reachable) and the VMI interface addresses on the under
 # cluster. Sets _e2e_ips[_wk].
 
-- name: worker addresses {{ _wk }} | tenant nodes
+- name: worker addresses {{ _wk }} | Read the tenant nodes' addresses
   ansible.builtin.command:
     argv: [kubectl, --kubeconfig, "{{ (_e2e_tk[_wk] | default({})).kc | default('') }}", get, nodes, -o, json]
   delegate_to: "{{ (_e2e_tk[_wk] | default({})).host | default('localhost') }}"
@@ -13,7 +13,7 @@
   failed_when: false
   when: _wk in _e2e_tk
 
-- name: worker addresses {{ _wk }} | VMIs
+- name: worker addresses {{ _wk }} | Read the worker VMs' addresses
   ansible.builtin.command: kubectl get vmi -n {{ _e2e_envs[_wk].ns }} -o json
   register: _wi_vmi
   changed_when: false
